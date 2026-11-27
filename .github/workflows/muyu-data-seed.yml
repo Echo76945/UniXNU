@@ -1,0 +1,360 @@
+name: Muyu Data seed candidate
+
+# Builds a first-install Data seed from the 24A446 OS volume on a hosted Mac.
+# The output is a candidate, not the Muyu's preserved historical Data container.
+# Generation uploads only an encrypted artifact; inspect mode publishes text only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Inspect the OS launchd hash, or generate the candidate seed
+        type: choice
+        options:
+          - inspect
+          - generate
+        default: inspect
+      launchd_sha256:
+        description: Exact SHA-256 from a prior inspect run; required for generate
+        required: false
+        default: ""
+      grow_gib:
+        description: Candidate Data container size in GiB
+        required: true
+        default: "200"
+      skip_setup:
+        description: Mark setup complete and populate first-boot directories
+        type: boolean
+        default: true
+      runner:
+        description: Hosted macOS runner
+        type: choice
+        options:
+          - macos-26-intel
+          - macos-26
+        default: macos-26-intel
+
+permissions:
+  contents: read
+
+concurrency:
+  group: muyu-data-seed-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  HOMEBREW_NO_ENV_HINTS: 1
+  OS_PROFILE: ipados-27.0.1-24A446
+  EXPECTED_IPSW_SHA256: fa93b653cc03c80ee5009302545479cb3b0f7bbaaa43f43a25e70cc328575b7a
+  EXPECTED_VOLUME_UUID: 58B481F8-4243-4430-BF60-DDD1638D4C6E
+  OUTPUT_NAME: muyu-data-200g.generated.dbr
+  UNIXNU_REPOSITORY: rootstockos/UniXNU
+  UNIXNU_REF: bd4766ae2cc27035a4c0f96360a5dd74a2e5b858
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  seed:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 120
+    steps:
+      - name: Check out the seed scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: driver
+          persist-credentials: false
+
+      - name: Check out the pinned UniXNU seed implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.UNIXNU_REPOSITORY }}
+          ref: ${{ env.UNIXNU_REF }}
+          path: unixnu
+          persist-credentials: false
+
+      - name: DarwinBoot packed ramdisk format
+        working-directory: unixnu
+        run: git submodule update --init --depth 1 drivers/DarwinBoot
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.13"
+
+      - name: Install the AEA key tool
+        run: brew install blacktop/tap/ipsw
+
+      - name: Fetch and decrypt the OS disk image
+        id: os-image
+        working-directory: unixnu
+        run: |
+          image=$(python3 - <<'PY'
+          import os, plistlib, shutil, sys, tomllib, zipfile
+          from pathlib import Path
+
+          sys.path.insert(0, 'scripts')
+          from unixnu.ipsw import RangeFile, decrypt_aea
+
+          profile = os.environ['OS_PROFILE']
+          spec = tomllib.loads(Path('profiles/os', profile, 'profile.toml').read_text())['ipsw']
+          archive = zipfile.ZipFile(RangeFile(spec['url']))
+          manifest = plistlib.loads(archive.read('BuildManifest.plist'))
+          if ((manifest['ProductVersion'], manifest['ProductBuildVersion']) !=
+                  (spec['version'], spec['build'])):
+              raise SystemExit('the profile IPSW version/build does not match')
+          identity = next(item for item in manifest['BuildIdentities']
+                          if item['Info']['DeviceClass'] == spec['device_class']
+                          and item['Info']['RestoreBehavior'] == 'Erase'
+                          and int(item['ApChipID'], 16) == spec['chip_id']
+                          and int(item['ApBoardID'], 16) == spec['board_id'])
+          member = identity['Manifest']['OS']['Info']['Path']
+          out = Path('.cache/firmware/target-volumes')
+          out.mkdir(parents=True, exist_ok=True)
+          image = out / Path(member).name
+          with archive.open(member) as source, image.open('wb') as target:
+              shutil.copyfileobj(source, target, 8 << 20)
+          if image.suffix == '.aea':
+              import hashlib, json
+              digest = hashlib.sha256(image.read_bytes()).hexdigest()
+              image.with_suffix(image.suffix + '.json').write_text(
+                  json.dumps({'component': 'OS', 'member': member, 'sha256': digest}) + '\n')
+              decrypted = decrypt_aea(image)
+              image.unlink()
+              image = decrypted
+          if not image.is_file():
+              raise SystemExit('the OS disk image was not produced')
+          print(image.resolve())
+          PY
+          )
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Mount the OS volume read-only
+        working-directory: unixnu
+        env:
+          OS_IMAGE: ${{ steps.os-image.outputs.image }}
+        run: |
+          mount="$GITHUB_WORKSPACE/unixnu/.cache/firmware/target-volumes/os-mount"
+          mkdir -p "$mount"
+          hdiutil attach -readonly -nobrowse -owners off \
+            -imagekey diskimage-class=CRawDiskImage -mountpoint "$mount" "$OS_IMAGE"
+          test -x "$mount/sbin/launchd"
+
+      - name: Inspect or validate launchd
+        id: launchd
+        working-directory: unixnu
+        env:
+          MODE: ${{ inputs.mode }}
+          EXPECTED_LAUNCHD: ${{ inputs.launchd_sha256 }}
+        run: |
+          actual=$(shasum -a 256 .cache/firmware/target-volumes/os-mount/sbin/launchd | awk '{print $1}')
+          echo "launchd_sha256=$actual" >> "$GITHUB_OUTPUT"
+          echo "::notice title=24A446 launchd SHA-256::$actual"
+          {
+            echo "## 24A446 OS launchd"
+            echo
+            echo '`'"$actual"'`'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$MODE" = inspect ]; then
+            exit 0
+          fi
+          if ! [[ "$EXPECTED_LAUNCHD" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::generate requires launchd_sha256 from a prior inspect run"
+            exit 1
+          fi
+          if [ "$EXPECTED_LAUNCHD" != "$actual" ]; then
+            echo "::error::launchd SHA-256 mismatch: expected $EXPECTED_LAUNCHD, got $actual"
+            exit 1
+          fi
+
+      - name: Refuse a missing encryption secret
+        if: inputs.mode == 'generate'
+        env:
+          PASSPHRASE: ${{ secrets.MUYU_DATA_SEED_PASSPHRASE }}
+        run: |
+          [ -n "$PASSPHRASE" ] || {
+            echo "::error::MUYU_DATA_SEED_PASSPHRASE is not configured; no Apple-derived artifact can be uploaded"
+            exit 1
+          }
+
+      - name: Generate the candidate Data seed
+        id: generate
+        if: inputs.mode == 'generate'
+        working-directory: unixnu
+        env:
+          LAUNCHD: ${{ steps.launchd.outputs.launchd_sha256 }}
+          GROW_GIB: ${{ inputs.grow_gib }}
+          SKIP_SETUP: ${{ inputs.skip_setup }}
+          OS_IMAGE: ${{ steps.os-image.outputs.image }}
+          VOLUME_UUID: ${{ env.EXPECTED_VOLUME_UUID }}
+          OUTPUT_NAME: ${{ env.OUTPUT_NAME }}
+          OS_PROFILE: ${{ env.OS_PROFILE }}
+          EXPECTED_IPSW_SHA256: ${{ env.EXPECTED_IPSW_SHA256 }}
+        run: |
+          if ! [[ "$GROW_GIB" =~ ^[0-9]+$ ]] || [ "$GROW_GIB" -lt 3 ] || [ "$GROW_GIB" -gt 1024 ]; then
+            echo "::error::grow_gib must be an integer in 3..1024"
+            exit 1
+          fi
+          mkdir -p build
+          python3 scripts/prepare-owner-data-fixture.py --launchd-sha256 "$LAUNCHD"
+          hdiutil detach .cache/firmware/target-volumes/os-mount
+
+          raw=build/owner-data-fixture/owner-data-32.cdr
+          python3 "$GITHUB_WORKSPACE/driver/scripts/muyu-data-seed.py" set-uuid "$raw" "$VOLUME_UUID"
+          python3 - "$raw" <<'PY'
+          import hashlib, json, plistlib, subprocess, sys
+          from pathlib import Path
+
+          raw = Path(sys.argv[1]).resolve()
+          report = raw.parent / 'seed.json'
+          values = json.loads(report.read_text())
+          values['source_volume_uuid'] = values.get('volume_uuid')
+          values['volume_uuid'] = '58B481F8-4243-4430-BF60-DDD1638D4C6E'
+          values['volume_uuid_source'] = 'fixed from CONFIG_XNU_OWNER_DATA_VOLUME_UUID'
+          values['raw_sha256_after_uuid'] = hashlib.sha256(raw.read_bytes()).hexdigest()
+          report.write_text(json.dumps(values, indent=2) + '\n')
+
+          mount = raw.parent / 'uuid-check'
+          mount.mkdir()
+          attached = plistlib.loads(subprocess.check_output([
+              'hdiutil', 'attach', '-imagekey', 'diskimage-class=CRawDiskImage',
+              '-nobrowse', '-owners', 'off', '-mountpoint', str(mount),
+              '-plist', str(raw)]))
+          device = attached['system-entities'][0]['dev-entry']
+          try:
+              observed = plistlib.loads(subprocess.check_output([
+                  'diskutil', 'info', '-plist', str(mount)]))['VolumeUUID'].upper()
+          finally:
+              subprocess.run(['hdiutil', 'detach', device], check=True)
+          if observed != '58B481F8-4243-4430-BF60-DDD1638D4C6E':
+              raise SystemExit(f'UUID check failed after patch: {observed}')
+          values['volume_uuid_verified_by_diskutil'] = True
+          report.write_text(json.dumps(values, indent=2) + '\n')
+          PY
+
+          python3 drivers/DarwinBoot/Test/packed_ramdisk.py \
+            "$raw" build/muyu-data-32.dbr
+          base=build/muyu-data-32.dbr
+          if [ "$SKIP_SETUP" = true ]; then
+            python3 scripts/seed-data-skip-setup.py "$base" build/muyu-data-32-setup.dbr --build=24A446
+            base=build/muyu-data-32-setup.dbr
+          fi
+
+          out="$GITHUB_WORKSPACE/out-data-seed"
+          mkdir -p "$out"
+          python3 scripts/seed-data-grow.py --gib "$GROW_GIB" \
+            "$base" "$out/$OUTPUT_NAME"
+          python3 "$GITHUB_WORKSPACE/driver/scripts/muyu-data-seed.py" inspect-packed \
+            "$out/$OUTPUT_NAME" --uuid "$VOLUME_UUID" --json "$out/inspect.json"
+
+          python3 - "$out" "$OS_IMAGE" "$LAUNCHD" "$GROW_GIB" "$SKIP_SETUP" \
+            "$VOLUME_UUID" "$OUTPUT_NAME" <<'PY'
+          import datetime, hashlib, json, os, sys, tomllib
+          from pathlib import Path
+
+          out, image, launchd, grow_gib, skip_setup, volume_uuid, output_name = sys.argv[1:]
+          out = Path(out)
+          image = Path(image)
+          inspect = json.loads((out / 'inspect.json').read_text())
+          image_record = json.loads(image.with_suffix('.json').read_text())
+          profile = tomllib.loads(Path('profiles/os', os.environ['OS_PROFILE'], 'profile.toml').read_text())
+          data = out / output_name
+          provenance = {
+              'schema': 1,
+              'generated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'status': 'generated_candidate_not_original_device_data',
+              'warning': 'This is first-install state derived from the 24A446 OS image. It is not the preserved Muyu Data container and contains no recovered user data.',
+              'device': 'Xiaomi Pad 7 Pro (muyu)',
+              'os_profile': os.environ['OS_PROFILE'],
+              'source_ipsw_url': profile['ipsw']['url'],
+              'declared_ipsw_sha256_not_rehashed_by_workflow': os.environ['EXPECTED_IPSW_SHA256'],
+              'os_image_member': image_record.get('member'),
+              'os_image_sha256': image_record.get('sha256'),
+              'source_aea_sha256': image_record.get('aea_sha256'),
+              'os_image_size': image_record.get('size', image.stat().st_size),
+              'launchd_sha256': launchd,
+              'volume_uuid': volume_uuid,
+              'grow_gib': int(grow_gib),
+              'skip_setup': skip_setup == 'true',
+              'packed_output': output_name,
+              'packed_sha256': inspect['packed_sha256'],
+              'packed_bytes': inspect['packed_bytes'],
+              'logical_bytes': inspect['logical_bytes'],
+              'logical_gib': inspect['logical_gib'],
+              'extents': inspect['extents'],
+              'volume_superblocks': inspect['volume_superblocks'],
+              'container': inspect['container'],
+              'production_storage_qualified': False,
+              'device_boot_verified': False,
+          }
+          (out / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          (out / 'SHA256SUMS').write_text(
+              hashlib.sha256(data.read_bytes()).hexdigest() + '  ' + output_name + '\n')
+          print(json.dumps(provenance, indent=2))
+          PY
+
+          cp build/owner-data-fixture/seed.json "$out/seed.json"
+          echo "output=$out/$OUTPUT_NAME" >> "$GITHUB_OUTPUT"
+          echo "provenance=$out/provenance.json" >> "$GITHUB_OUTPUT"
+
+      - name: Encrypt the Apple-derived artifact
+        if: inputs.mode == 'generate'
+        env:
+          PASSPHRASE: ${{ secrets.MUYU_DATA_SEED_PASSPHRASE }}
+          OUTPUT_NAME: ${{ env.OUTPUT_NAME }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/encrypted"
+          tar -C "$GITHUB_WORKSPACE/out-data-seed" -czf "$RUNNER_TEMP/muyu-data-seed.tar.gz" "$OUTPUT_NAME"
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -pass env:PASSPHRASE -in "$RUNNER_TEMP/muyu-data-seed.tar.gz" \
+            -out "$RUNNER_TEMP/encrypted/muyu-data-seed.tar.gz.enc"
+
+      - name: Upload the encrypted candidate
+        if: inputs.mode == 'generate'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: muyu-data-seed-encrypted-${{ github.run_id }}
+          path: ${{ runner.temp }}/encrypted/muyu-data-seed.tar.gz.enc
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload candidate provenance
+        if: inputs.mode == 'generate'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: muyu-data-seed-provenance-${{ github.run_id }}
+          path: |
+            out-data-seed/provenance.json
+            out-data-seed/seed.json
+            out-data-seed/inspect.json
+            out-data-seed/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        env:
+          MODE: ${{ inputs.mode }}
+          LAUNCHD: ${{ steps.launchd.outputs.launchd_sha256 }}
+        run: |
+          {
+            echo "## Muyu Data seed candidate"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Mode | $MODE |"
+            echo "| OS profile | $OS_PROFILE |"
+            echo "| launchd SHA-256 | ${LAUNCHD:-unavailable} |"
+            echo "| Volume UUID | $EXPECTED_VOLUME_UUID |"
+            echo
+            echo "A generated seed is first-install state, not the preserved device Data container."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove OS-derived inputs
+        if: always()
+        run: |
+          mount="$GITHUB_WORKSPACE/unixnu/.cache/firmware/target-volumes/os-mount"
+          if mount | grep -F " on $mount " >/dev/null; then hdiutil detach "$mount" || true; fi
+          rm -rf unixnu/.cache/firmware unixnu/build unixnu/out-data-seed out-data-seed
+          rm -f "$RUNNER_TEMP/muyu-data-seed.tar.gz" "$RUNNER_TEMP"/encrypted/muyu-data-seed.tar.gz.enc
