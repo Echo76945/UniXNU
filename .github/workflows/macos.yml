@@ -39,21 +39,18 @@ on:
         description: IPSW URL (empty uses board.toml)
         required: false
         default: ""
-      input_bundle_asset:
-        description: Encrypted release asset containing the trust cache and Data seed (required for payload)
+      data_seed_run_id:
+        description: Successful Muyu Data seed workflow run ID (required for payload)
         required: false
         default: ""
-      input_bundle_tag:
-        description: Immutable release tag containing input_bundle_asset
+      data_seed_packed_sha256:
+        description: Expected SHA-256 of the decrypted Muyu packed Data seed (required for payload)
         required: false
-        default: muyu-ipados27-inputs
-      owner_trust_cache:
-        description: Treat the bundled trust cache as an owner-signed bundle
-        type: boolean
-        default: false
+        default: ""
 
 permissions:
   contents: read
+  actions: read
 
 # One build per device configuration and ref. A dispatch for another device or defconfig runs next to it,
 # and a running build is never cancelled by a later dispatch.
@@ -106,9 +103,8 @@ jobs:
         id: check
         env:
           HAS_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID != '' }}
-          OWNER_TRUST_CACHE: ${{ inputs.owner_trust_cache }}
-          INPUT_BUNDLE_ASSET: ${{ inputs.input_bundle_asset }}
-          INPUT_BUNDLE_TAG: ${{ inputs.input_bundle_tag }}
+          DATA_SEED_RUN_ID: ${{ inputs.data_seed_run_id }}
+          DATA_SEED_PACKED_SHA256: ${{ inputs.data_seed_packed_sha256 }}
           HAS_PASSPHRASE: ${{ secrets.MUYU_DATA_SEED_PASSPHRASE != '' }}
         run: |
           python3 scripts/unixnu/test_boot_template.py
@@ -116,16 +112,14 @@ jobs:
           [ -f device/board.toml ] || fail "the device repository has no board.toml"
           [ -f "device/configs/$DEFCONFIG" ] || fail "device/configs/$DEFCONFIG not found: $(cd device/configs 2>/dev/null && printf '%s ' *_defconfig)"
           [ -d "$DEVELOPER_DIR" ] || fail "Xcode not found at $DEVELOPER_DIR; installed: $(printf '%s ' /Applications/Xcode_*.app)"
-          if [[ "$STEPS" == *payload* ]] && [ -z "$INPUT_BUNDLE_ASSET" ]; then
-            fail "payload builds need input_bundle_asset"
+          if [[ "$STEPS" == *payload* ]]; then
+            [ -n "$UNIXNU_IPSW" ] || fail "payload builds need ipsw_url"
+            [[ "$DATA_SEED_RUN_ID" =~ ^[1-9][0-9]*$ ]] || fail "payload builds need a numeric data_seed_run_id"
+            [[ "$DATA_SEED_PACKED_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "payload builds need a lowercase data_seed_packed_sha256"
+            [ "$HAS_PASSPHRASE" = true ] || fail "payload builds need the MUYU_DATA_SEED_PASSPHRASE secret"
           fi
-          if [ -n "$INPUT_BUNDLE_ASSET" ]; then
-            [[ "$INPUT_BUNDLE_ASSET" =~ ^[A-Za-z0-9._-]+$ ]] || fail "input_bundle_asset contains unsupported characters"
-            [[ "$INPUT_BUNDLE_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || fail "input_bundle_tag contains unsupported characters"
-            [ "$HAS_PASSPHRASE" = true ] || fail "input_bundle_asset needs the MUYU_DATA_SEED_PASSPHRASE secret"
-          fi
-          if [[ "$STEPS" != *payload* ]] && { [ -n "$INPUT_BUNDLE_ASSET" ] || [ "$OWNER_TRUST_CACHE" = true ]; }; then
-            fail "input_bundle_asset and owner_trust_cache only apply to the payload step"
+          if [[ "$STEPS" != *payload* ]] && { [ -n "$DATA_SEED_RUN_ID" ] || [ -n "$DATA_SEED_PACKED_SHA256" ]; }; then
+            fail "Data seed inputs only apply to the payload step"
           fi
           python3 - <<'PY'
           import os, sys
@@ -179,25 +173,91 @@ jobs:
       - name: Prepare inputs
         if: contains(inputs.steps, 'payload')
         env:
-          INPUT_BUNDLE_ASSET: ${{ inputs.input_bundle_asset }}
-          INPUT_BUNDLE_TAG: ${{ inputs.input_bundle_tag }}
+          DATA_SEED_RUN_ID: ${{ inputs.data_seed_run_id }}
+          EXPECTED_DATA_SEED_SHA256: ${{ inputs.data_seed_packed_sha256 }}
           PASSPHRASE: ${{ secrets.MUYU_DATA_SEED_PASSPHRASE }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           umask 077
-          bundle="$RUNNER_TEMP/muyu-inputs.tar.gz.enc"
-          bundle_hmac="$bundle.hmac"
-          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${INPUT_BUNDLE_TAG}/${INPUT_BUNDLE_ASSET}"
-          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "$bundle" "$release_url"
-          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "$bundle_hmac" "$release_url.hmac"
-          python3 scripts/muyu-input-bundle.py unpack \
-            --bundle "$bundle" \
-            --hmac "$bundle_hmac" \
-            --output-dir "$RUNNER_TEMP/muyu-inputs" \
-            --expected-asset "$INPUT_BUNDLE_ASSET" \
-            --expected-tag "$INPUT_BUNDLE_TAG" \
-            --passphrase-env PASSPHRASE
-          mv "$RUNNER_TEMP/muyu-inputs/trustcache" "$RUNNER_TEMP/trustcache"
-          mv "$RUNNER_TEMP/muyu-inputs/data.dbr" "$RUNNER_TEMP/data.dbr"
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions"
+          artifact_name="muyu-data-seed-encrypted-${DATA_SEED_RUN_ID}"
+          run_json="$RUNNER_TEMP/data-seed-run.json"
+          artifacts_json="$RUNNER_TEMP/data-seed-artifacts.json"
+          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "$api/runs/$DATA_SEED_RUN_ID" -o "$run_json"
+          jq -e \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg path '.github/workflows/muyu-data-seed.yml' \
+            '.status == "completed" and .conclusion == "success" and
+             .repository.full_name == $repo and .path == $path' \
+            "$run_json" >/dev/null
+          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "$api/runs/$DATA_SEED_RUN_ID/artifacts?per_page=100" -o "$artifacts_json"
+          artifact_id=$(jq -r --arg name "$artifact_name" \
+            '.artifacts[] | select(.name == $name and (.expired | not)) | .id' \
+            "$artifacts_json" | head -n 1)
+          [ -n "$artifact_id" ] || {
+            echo "::error::encrypted Data seed artifact $artifact_name is missing or expired"
+            exit 1
+          }
+          seed_zip="$RUNNER_TEMP/muyu-data-seed.zip"
+          seed_enc="$RUNNER_TEMP/muyu-data-seed.tar.gz.enc"
+          seed_tar="$RUNNER_TEMP/muyu-data-seed.tar.gz"
+          seed_dir="$RUNNER_TEMP/muyu-data-seed"
+          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "$api/artifacts/$artifact_id/zip" -o "$seed_zip"
+          unzip -p "$seed_zip" muyu-data-seed.tar.gz.enc > "$seed_enc"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -pass env:PASSPHRASE -in "$seed_enc" -out "$seed_tar"
+          mkdir -p "$seed_dir"
+          tar -xzf "$seed_tar" -C "$seed_dir"
+          seed="$seed_dir/muyu-data-200g.generated.dbr"
+          printf '%s  %s\n' "$EXPECTED_DATA_SEED_SHA256" "$seed" | shasum -a 256 -c -
+          mv "$seed" "$RUNNER_TEMP/data.dbr"
+
+          trust_dir="$RUNNER_TEMP/trustcache-inputs"
+          mkdir -p "$trust_dir"
+          python3 - "$trust_dir" <<'PY'
+          import os, plistlib, shutil, sys, tomllib, zipfile
+          from pathlib import Path
+
+          sys.path.insert(0, 'scripts')
+          from unixnu.ipsw import RangeFile
+
+          output = Path(sys.argv[1])
+          profile = tomllib.loads(
+              Path('profiles/os/ipados-27.0.1-24A446/profile.toml').read_text()
+          )['ipsw']
+          archive = zipfile.ZipFile(RangeFile(os.environ['UNIXNU_IPSW']))
+          manifest = plistlib.loads(archive.read('BuildManifest.plist'))
+          if ((manifest['ProductVersion'], manifest['ProductBuildVersion']) !=
+                  (profile['version'], profile['build'])):
+              raise SystemExit('the IPSW version/build does not match the profile')
+          identity = next(item for item in manifest['BuildIdentities']
+                          if item['Info']['DeviceClass'] == profile['device_class']
+                          and item['Info']['RestoreBehavior'] == 'Erase'
+                          and int(item['ApChipID'], 16) == profile['chip_id']
+                          and int(item['ApBoardID'], 16) == profile['board_id'])
+          for component, name in (
+                  ('StaticTrustCache', 'static.trustcache'),
+                  ('Cryptex1,SystemTrustCache', 'system.trustcache')):
+              member = identity['Manifest'][component]['Info']['Path']
+              with archive.open(member) as source, (output / name).open('wb') as target:
+                  shutil.copyfileobj(source, target, 8 << 20)
+          print(*(path.name for path in sorted(output.iterdir())), sep='\n')
+          PY
+          python3 scripts/bundle-ipsw-trust.py \
+            "$RUNNER_TEMP/trustcache" \
+            "$trust_dir/static.trustcache" "$trust_dir/system.trustcache"
+          printf '%s  %s\n' \
+            dc655bcb2ddfaea214f9ec83659b3fc8d8b658bafac2b5a004fb4179a25c89bf \
+            "$RUNNER_TEMP/trustcache" | shasum -a 256 -c -
 
       - name: Build kernel
         id: kernel
@@ -222,18 +282,10 @@ jobs:
         if: contains(inputs.steps, 'payload')
         env:
           UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
-          OWNER_TRUST_CACHE: ${{ inputs.owner_trust_cache }}
         run: |
-          args=()
-          if [ -f "$RUNNER_TEMP/trustcache" ]; then
-            if [ "$OWNER_TRUST_CACHE" = true ]; then
-              args+=(--owner-trust-cache "$RUNNER_TEMP/trustcache")
-            else
-              args+=(--trust-cache "$RUNNER_TEMP/trustcache")
-            fi
-          fi
-          if [ -f "$RUNNER_TEMP/data.dbr" ]; then args+=(--data-ramdisk "$RUNNER_TEMP/data.dbr"); fi
-          ./unixnu build payload "${args[@]}"
+          ./unixnu build payload \
+            --trust-cache "$RUNNER_TEMP/trustcache" \
+            --data-ramdisk "$RUNNER_TEMP/data.dbr"
 
       - name: Collect the text logs
         id: logs
@@ -302,6 +354,8 @@ jobs:
         if: always()
         run: |
           rm -rf out/ipsw out/feeds device/.cache/firmware out/*/tree/.cache/firmware out/*/payload/data-skip-setup-* out/*/*/*/tree/.cache/firmware out/*/*/*/payload/data-skip-setup-*
-          rm -rf "$RUNNER_TEMP/muyu-inputs" "$RUNNER_TEMP/muyu-inputs.tar.gz"
+          rm -rf "$RUNNER_TEMP/muyu-data-seed" "$RUNNER_TEMP/trustcache-inputs"
           rm -f "$RUNNER_TEMP/trustcache" "$RUNNER_TEMP/data.dbr" \
-            "$RUNNER_TEMP/muyu-inputs.tar.gz.enc" "$RUNNER_TEMP/muyu-inputs.tar.gz.enc.hmac"
+            "$RUNNER_TEMP/muyu-data-seed.zip" "$RUNNER_TEMP/muyu-data-seed.tar.gz" \
+            "$RUNNER_TEMP/muyu-data-seed.tar.gz.enc" \
+            "$RUNNER_TEMP/data-seed-run.json" "$RUNNER_TEMP/data-seed-artifacts.json"
