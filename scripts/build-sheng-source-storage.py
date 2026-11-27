@@ -84,6 +84,30 @@ def package_dirs_for(tree, device):
     return package_dirs
 
 
+def find_device_source(relative, package_dirs, device, tree, extra=()):
+    """Find one package source without requiring that every optional helper exists."""
+    for directory in list(extra) + package_dirs + [device, tree]:
+        candidate = directory / relative
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def optional_ios27_sources(package_dirs, device, tree):
+    """Return board diagnostics that are safe to omit from the kernel-only path.
+
+    BootLogStubs.c remains the required link boundary when these are absent. The
+    source-storage path owns storage, not optional Wi-Fi, Bluetooth or diagnostic
+    capture; compiling those helpers requires their board drivers and firmware.
+    """
+    present, missing = [], []
+    for name in ('BootProcessProbe.c', 'BootUiTraceProbe.c', 'BootProcessWorker.c',
+                 'BootDiagExport.c', 'WifiFirmware.c', 'BluetoothFirmware.c'):
+        source = find_device_source(name, package_dirs, device, tree)
+        (present if source else missing).append(source or name)
+    return present, missing
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tree', type=Path, default=ROOT)
@@ -114,10 +138,9 @@ def main():
     package_dirs = package_dirs_for(tree, device)
 
     def device_source(relative, *extra):
-        for directory in list(extra) + package_dirs + [device, tree]:
-            candidate = directory / relative
-            if candidate.is_file():
-                return candidate
+        source = find_device_source(relative, package_dirs, device, tree, extra)
+        if source:
+            return source
         parser.error(f'{relative} not found under the device or build tree')
     if os.environ.get('UNIXNU_XNU_ARCH', 'arm64e') != 'arm64e':
         parser.error('This adapter requires an arm64e iPadOS profile')
@@ -221,22 +244,28 @@ OSDefineOperatorMethods(IOBlockStorageDevice)
     # The RAM disk carries the Data seed; like NativeUfs its class registers with the source storage classes.
     sources = [base, device / 'drivers/ShengUfs/NativeUfs.cpp', ROOT / 'drivers/RamBlock/NativeRamBlock.cpp',
                device_source('SourceStorage.cpp'), device_source('SourceRootPolicies.cpp'),
-               device_source('SourceRootBinding.cpp'), device_source('BootLog.c'), boot_log_defaults, device_source('BootReset.c'),
+               device_source('SourceRootBinding.cpp'), device_source('BootLog.c'), boot_log_defaults,
+               device_source('BootLogStubs.c'),
                ROOT / 'kits/VerifiedRoot/src/verified_root.c',
                ROOT / 'kits/VerifiedRoot/adapters/xnu_crypto.c', anchor]
+    optional_missing = []
     if int(os.environ['UNIXNU_IOS_VERSION'].split('.')[0]) >= 27:
         # The source path does not run BootProgress's process worker. Reuse its
         # native capture code in a separate worker owned by the UFS log.
         flags.append('-DNATIVE_BOOT_PROCESS_CAPTURE=1')
-        sources += [device_source(name) for name in
-                    ('BootProcessProbe.c', 'BootUiTraceProbe.c', 'BootProcessWorker.c')]
+        optional_sources, optional_missing = optional_ios27_sources(package_dirs, device, tree)
+        sources += optional_sources
         # The launchd job policy (disable-watchdogd, lite, disable-jobs, setup) that BootProgress carries on
         # iPadOS 17; the kernel runs it after the Data mount.
         sources.append(device_source('BootWatchdogPolicy.c'))
-        # The diagnostic file export (diag-export): the unified log, crash reports and a screenshot, read through the VFS.
-        sources.append(device_source('BootDiagExport.c'))
-        sources.append(device_source('WifiFirmware.c'))
-        sources.append(device_source('BluetoothFirmware.c'))
+        # BootReset.c is another board capability boundary. Its reset/watchdog
+        # helpers are optional; BootLogStubs.c supplies honest failure returns
+        # when the board does not implement them yet.
+        boot_reset = find_device_source('BootReset.c', package_dirs, device, tree)
+        if boot_reset:
+            sources.append(boot_reset)
+        else:
+            optional_missing.append('BootReset.c')
     latency = next((directory / 'BootLatencyTrace.c' for directory in package_dirs
                     if (directory / 'BootLatencyTrace.c').is_file()), None)
     if latency:
@@ -283,6 +312,8 @@ OSDefineOperatorMethods(IOBlockStorageDevice)
                   headers=header_report, target=target.TRIPLE,
                   policy_bundle_sha256=build.sha(out / 'root-policies.bin'),
                   trusted_key_sha256=hashlib.sha256(key).hexdigest(), runtime_qualified=False)
+    if optional_missing:
+        report['optional_sources_absent'] = optional_missing
     (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(archive)
 
