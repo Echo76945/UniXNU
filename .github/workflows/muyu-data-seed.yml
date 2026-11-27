@@ -85,9 +85,32 @@ jobs:
 
       - name: Install the AEA key tool
         run: |
-          # The tap now publishes both a formula and a cask. Homebrew selected the cask in the
-          # first run and rejected that tap's zap stanza, so pin the formula explicitly.
-          brew install --formula blacktop/tap/ipsw
+          # The tap now contains a cask whose DSL is rejected while Homebrew loads the tap,
+          # even with --formula. Use the pinned upstream release directly.
+          version=3.1.648
+          case "$(uname -m)" in
+            x86_64)
+              asset=ipsw_${version}_macOS_x86_64_extras.tar.gz
+              sha=5ba7bffc8d8b889778bd9a46ea1184144ac7b95eb57525fc0f75dd3c707b0a03
+              ;;
+            arm64)
+              asset=ipsw_${version}_macOS_arm64_extras.tar.gz
+              sha=ece6339e446b2128b0099eab3a5c1307d1b8ebab3699ffc2f643cd31a1c04183
+              ;;
+            *)
+              echo "::error::unsupported runner architecture $(uname -m)"
+              exit 1
+              ;;
+          esac
+          archive="$RUNNER_TEMP/$asset"
+          curl -fsSL --retry 3 \
+            -o "$archive" \
+            "https://github.com/blacktop/ipsw/releases/download/v${version}/${asset}"
+          printf '%s  %s\n' "$sha" "$archive" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/ipsw"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/ipsw"
+          echo "$RUNNER_TEMP/ipsw" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ipsw/ipsw" version
 
       - name: Fetch and decrypt the OS disk image
         id: os-image
