@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'scripts' / 'build-sheng-source-storage.py'
@@ -20,9 +21,11 @@ class SourceStoragePackageTests(unittest.TestCase):
             root = Path(temporary)
             tree = root / 'tree'
             tree.mkdir()
-            (tree / 'board.toml').write_text('[board]\nkit = "muyu"\n')
             device = root / 'device'
+            device.mkdir()
+            (device / 'board.toml').write_text('[board]\nkit = "muyu"\n')
             directories = MODULE.package_dirs_for(tree, device)
+            self.assertIn(device / 'kits' / 'muyu', directories)
             self.assertIn(tree / 'kits' / 'muyu', directories)
             self.assertLess(directories.index(tree / 'kits' / 'muyu'),
                             directories.index(tree / 'kits' / 'sheng'))
@@ -36,6 +39,14 @@ class SourceStoragePackageTests(unittest.TestCase):
             directories = MODULE.package_dirs_for(tree, device)
             self.assertEqual(directories, [device / 'package', device / 'kits' / 'sheng',
                                             tree / 'kits' / 'sheng'])
+
+    def test_environment_device_is_used(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tree = root / 'tree'
+            device = root / 'device'
+            with mock.patch.dict(MODULE.os.environ, {'UNIXNU_DEVICE': str(device)}):
+                self.assertEqual(MODULE.resolve_device(tree), device.resolve())
 
 
 if __name__ == '__main__':

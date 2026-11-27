@@ -63,9 +63,16 @@ def weak_defaults(source):
     return '\n'.join(includes + pragma + lines) + '\n'
 
 
+def resolve_device(tree, explicit=None):
+    """Resolve the device checkout independently of the assembled source tree."""
+    return Path(explicit or os.environ.get('UNIXNU_DEVICE') or tree).resolve()
+
+
 def package_dirs_for(tree, device):
     """Return the package locations in the order used by the source-storage builder."""
-    board_file = tree / 'board.toml'
+    board_file = device / 'board.toml'
+    if not board_file.is_file():
+        board_file = tree / 'board.toml'
     kit_name = 'sheng'
     if board_file.is_file():
         kit_name = tomllib.loads(board_file.read_text()).get('board', {}).get('kit', kit_name)
@@ -87,7 +94,7 @@ def main():
     parser.add_argument('--check-inputs', action='store_true', help='Validate policy and source inputs without compiling')
     args = parser.parse_args()
     tree = args.tree.resolve()
-    device = (args.device or tree).resolve()
+    device = resolve_device(tree, args.device)
     storage = (args.storage_source or tree / 'refer/IOStorageFamily').resolve()
     # The OS profile names the root images ([root]); kernel.py passes them in the environment.
     build_id = os.environ.get('UNIXNU_IPSW_BUILD')
