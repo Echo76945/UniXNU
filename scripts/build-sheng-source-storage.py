@@ -16,6 +16,7 @@ from unixnu.util import tool
 import shutil
 import struct
 import subprocess
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,6 +63,20 @@ def weak_defaults(source):
     return '\n'.join(includes + pragma + lines) + '\n'
 
 
+def package_dirs_for(tree, device):
+    """Return the package locations in the order used by the source-storage builder."""
+    board_file = tree / 'board.toml'
+    kit_name = 'sheng'
+    if board_file.is_file():
+        kit_name = tomllib.loads(board_file.read_text()).get('board', {}).get('kit', kit_name)
+    package_dirs = [device / 'package']
+    for directory in (device / 'kits' / kit_name, tree / 'kits' / kit_name,
+                      device / 'kits/sheng', tree / 'kits/sheng'):
+        if directory not in package_dirs:
+            package_dirs.append(directory)
+    return package_dirs
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tree', type=Path, default=ROOT)
@@ -87,13 +102,9 @@ def main():
             parser.error(f'no policy directory for {build_id}: pass --policy-dir or ship scripts/policies/*{build_id}')
         policies = shipped[0]
     policies = policies.resolve()
-    # The resolved build tree links the device package as kits/sheng, while an
-    # explicit device repository keeps package/ and drivers/ side by side.
-    package_dirs = [device / 'package']
-    if device != tree:
-        package_dirs += [device / 'kits/sheng', tree / 'kits/sheng']
-    else:
-        package_dirs += [tree / 'kits/sheng']
+    # The resolved build tree links the device package as kits/<board.kit>.
+    # Older trees used kits/sheng for the same package, so that remains a fallback.
+    package_dirs = package_dirs_for(tree, device)
 
     def device_source(relative, *extra):
         for directory in list(extra) + package_dirs + [device, tree]:
