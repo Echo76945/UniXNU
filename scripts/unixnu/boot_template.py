@@ -166,7 +166,8 @@ def replace_loader(firmware, pe, identifier):
             raise Error('an unrelated firmware module changed')
     packed = bytearray(lzma.compress(bytes(rebuilt), format=lzma.FORMAT_ALONE,
                                     filters=[{'id': lzma.FILTER_LZMA1, 'dict_size': 1 << 24, 'lc': 3, 'lp': 0, 'pb': 2}]))
-    packed[5:13] = len(rebuilt).to_bytes(8, 'little')
+    # FORMAT_ALONE emits an end marker when the header keeps the unknown-size value.
+    # Writing a known size here leaves the end marker in the stream and makes it invalid.
     updated = bytearray(section[:24]) + packed
     put24(updated, 0, len(updated))
     file = bytearray(outer[:24]) + updated
