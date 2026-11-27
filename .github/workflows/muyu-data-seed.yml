@@ -161,6 +161,13 @@ jobs:
           print(image.resolve())
           PY
           )
+          # decrypt_aea logs to stdout, so command substitution can contain diagnostics before
+          # the final path. Keep only that path and refuse an empty/multiline output marker.
+          image=${image##*$'\n'}
+          [ -n "$image" ] && [ -f "$image" ] || {
+            echo "::error::the OS disk image path was not produced"
+            exit 1
+          }
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - name: Mount the OS volume read-only
