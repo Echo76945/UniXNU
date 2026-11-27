@@ -205,6 +205,9 @@ jobs:
           # prepare-xnu-source.py lists Apple sources through the GitHub API; anonymous calls from hosted runners hit
           # the shared rate limit (HTTP 403).
           GITHUB_TOKEN: ${{ github.token }}
+          # The device repository ships only the signed 544-byte policy headers;
+          # the full block tables are generated with the userdata image.
+          XNU_SOURCE_STORAGE_TABLES: userdata
         run: ./unixnu build kernel
 
       - name: Build userdata
