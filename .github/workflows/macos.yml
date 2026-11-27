@@ -28,6 +28,13 @@ on:
         description: Xcode version of the macos-26 image (/Applications/Xcode_<version>.app)
         required: true
         default: "26.6"
+      runner:
+        description: Hosted macOS runner (intel is the fallback when arm64 is queued)
+        type: choice
+        options:
+          - macos-26
+          - macos-26-intel
+        default: macos-26
       ipsw_url:
         description: IPSW URL (empty uses board.toml)
         required: false
@@ -77,9 +84,10 @@ defaults:
 
 jobs:
   build:
-    # Pinned: macos-latest moves between images (macos-15 had an Xcode whose clang rejects the warning options the
-    # build passes with -Werror). macos-26 is arm64 and carries the Xcode 26 line the build is developed with.
-    runs-on: macos-26
+    # Pinned to the macOS 26 image family: macos-latest moves between images (macos-15 had an Xcode
+    # whose clang rejects the warning options the build passes with -Werror). The Intel image is the
+    # same Xcode 26 line and avoids waiting indefinitely for an arm64 slot.
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 360
     env:
       DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
