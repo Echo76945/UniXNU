@@ -43,6 +43,10 @@ on:
         description: Successful Muyu Data seed workflow run ID (required for payload)
         required: false
         default: ""
+      data_seed_source_sha:
+        description: Expected source commit of the Muyu Data seed workflow run (required for payload)
+        required: false
+        default: ""
       data_seed_packed_sha256:
         description: Expected SHA-256 of the decrypted Muyu packed Data seed (required for payload)
         required: false
@@ -104,6 +108,7 @@ jobs:
         env:
           HAS_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID != '' }}
           DATA_SEED_RUN_ID: ${{ inputs.data_seed_run_id }}
+          DATA_SEED_SOURCE_SHA: ${{ inputs.data_seed_source_sha }}
           DATA_SEED_PACKED_SHA256: ${{ inputs.data_seed_packed_sha256 }}
           HAS_PASSPHRASE: ${{ secrets.MUYU_DATA_SEED_PASSPHRASE != '' }}
         run: |
@@ -115,10 +120,11 @@ jobs:
           if [[ "$STEPS" == *payload* ]]; then
             [ -n "$UNIXNU_IPSW" ] || fail "payload builds need ipsw_url"
             [[ "$DATA_SEED_RUN_ID" =~ ^[1-9][0-9]*$ ]] || fail "payload builds need a numeric data_seed_run_id"
+            [[ "$DATA_SEED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "payload builds need a lowercase data_seed_source_sha"
             [[ "$DATA_SEED_PACKED_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "payload builds need a lowercase data_seed_packed_sha256"
             [ "$HAS_PASSPHRASE" = true ] || fail "payload builds need the MUYU_DATA_SEED_PASSPHRASE secret"
           fi
-          if [[ "$STEPS" != *payload* ]] && { [ -n "$DATA_SEED_RUN_ID" ] || [ -n "$DATA_SEED_PACKED_SHA256" ]; }; then
+          if [[ "$STEPS" != *payload* ]] && { [ -n "$DATA_SEED_RUN_ID" ] || [ -n "$DATA_SEED_SOURCE_SHA" ] || [ -n "$DATA_SEED_PACKED_SHA256" ]; }; then
             fail "Data seed inputs only apply to the payload step"
           fi
           python3 - <<'PY'
@@ -174,6 +180,7 @@ jobs:
         if: contains(inputs.steps, 'payload')
         env:
           DATA_SEED_RUN_ID: ${{ inputs.data_seed_run_id }}
+          DATA_SEED_SOURCE_SHA: ${{ inputs.data_seed_source_sha }}
           EXPECTED_DATA_SEED_SHA256: ${{ inputs.data_seed_packed_sha256 }}
           PASSPHRASE: ${{ secrets.MUYU_DATA_SEED_PASSPHRASE }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -190,8 +197,9 @@ jobs:
           jq -e \
             --arg repo "$GITHUB_REPOSITORY" \
             --arg path '.github/workflows/muyu-data-seed.yml' \
+            --arg sha "$DATA_SEED_SOURCE_SHA" \
             '.status == "completed" and .conclusion == "success" and
-             .repository.full_name == $repo and .path == $path' \
+             .repository.full_name == $repo and .path == $path and .head_sha == $sha' \
             "$run_json" >/dev/null
           curl -fsSL --retry 3 --proto '=https' --tlsv1.2 \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -216,7 +224,7 @@ jobs:
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -salt \
             -pass env:PASSPHRASE -in "$seed_enc" -out "$seed_tar"
           mkdir -p "$seed_dir"
-          tar -xzf "$seed_tar" -C "$seed_dir"
+          tar -xzf "$seed_tar" -C "$seed_dir" muyu-data-200g.generated.dbr
           seed="$seed_dir/muyu-data-200g.generated.dbr"
           printf '%s  %s\n' "$EXPECTED_DATA_SEED_SHA256" "$seed" | shasum -a 256 -c -
           mv "$seed" "$RUNNER_TEMP/data.dbr"
@@ -356,6 +364,7 @@ jobs:
           rm -rf out/ipsw out/feeds device/.cache/firmware out/*/tree/.cache/firmware out/*/payload/data-skip-setup-* out/*/*/*/tree/.cache/firmware out/*/*/*/payload/data-skip-setup-*
           rm -rf "$RUNNER_TEMP/muyu-data-seed" "$RUNNER_TEMP/trustcache-inputs"
           rm -f "$RUNNER_TEMP/trustcache" "$RUNNER_TEMP/data.dbr" \
+            "$RUNNER_TEMP/trustcache.json" \
             "$RUNNER_TEMP/muyu-data-seed.zip" "$RUNNER_TEMP/muyu-data-seed.tar.gz" \
             "$RUNNER_TEMP/muyu-data-seed.tar.gz.enc" \
             "$RUNNER_TEMP/data-seed-run.json" "$RUNNER_TEMP/data-seed-artifacts.json"
