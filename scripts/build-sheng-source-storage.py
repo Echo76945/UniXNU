@@ -94,18 +94,31 @@ def find_device_source(relative, package_dirs, device, tree, extra=()):
 
 
 def optional_ios27_sources(package_dirs, device, tree):
-    """Return board diagnostics that are safe to omit from the kernel-only path.
+    """Return complete optional diagnostic groups without taking partial ones.
 
     BootLogStubs.c remains the required link boundary when these are absent. The
     source-storage path owns storage, not optional Wi-Fi, Bluetooth or diagnostic
-    capture; compiling those helpers requires their board drivers and firmware.
+    capture; compiling those helpers requires their board drivers, firmware and
+    matching headers.
     """
-    present, missing = [], []
-    for name in ('BootProcessProbe.c', 'BootUiTraceProbe.c', 'BootProcessWorker.c',
-                 'BootDiagExport.c', 'WifiFirmware.c', 'BluetoothFirmware.c'):
-        source = find_device_source(name, package_dirs, device, tree)
-        (present if source else missing).append(source or name)
-    return present, missing
+    groups = (
+        ('boot-process-capture',
+         ('BootProcessProbe.c', 'BootUiTraceProbe.c', 'BootProcessWorker.c')),
+        ('diagnostic-export',
+         ('BootDiagExport.c', 'BootLatencyTrace.h', 'BootLatencyFiles.h', 'TouchTrace.h')),
+        ('wifi-firmware', ('WifiFirmware.c', 'WifiFirmware.h')),
+        ('bluetooth-firmware', ('BluetoothFirmware.c', 'BluetoothFirmware.h')),
+    )
+    selected, missing, skipped = [], [], []
+    for group, names in groups:
+        found = [find_device_source(name, package_dirs, device, tree) for name in names]
+        if all(found):
+            selected += [source for source in found if source.suffix == '.c']
+        else:
+            missing += [name for name, source in zip(names, found) if source is None]
+            if any(found):
+                skipped.append(group)
+    return selected, missing, skipped
 
 
 def main():
@@ -249,11 +262,14 @@ OSDefineOperatorMethods(IOBlockStorageDevice)
                ROOT / 'kits/VerifiedRoot/src/verified_root.c',
                ROOT / 'kits/VerifiedRoot/adapters/xnu_crypto.c', anchor]
     optional_missing = []
+    optional_groups_skipped = []
     if int(os.environ['UNIXNU_IOS_VERSION'].split('.')[0]) >= 27:
-        # The source path does not run BootProgress's process worker. Reuse its
-        # native capture code in a separate worker owned by the UFS log.
-        flags.append('-DNATIVE_BOOT_PROCESS_CAPTURE=1')
-        optional_sources, optional_missing = optional_ios27_sources(package_dirs, device, tree)
+        optional_sources, optional_missing, optional_groups_skipped = optional_ios27_sources(
+            package_dirs, device, tree)
+        # The source path only enables process capture when the probe, worker and
+        # their 24A446-compatible headers form a complete group.
+        if any(source.name == 'BootProcessWorker.c' for source in optional_sources):
+            flags.append('-DNATIVE_BOOT_PROCESS_CAPTURE=1')
         sources += optional_sources
         # The launchd job policy (disable-watchdogd, lite, disable-jobs, setup) that BootProgress carries on
         # iPadOS 17; the kernel runs it after the Data mount.
@@ -314,6 +330,8 @@ OSDefineOperatorMethods(IOBlockStorageDevice)
                   trusted_key_sha256=hashlib.sha256(key).hexdigest(), runtime_qualified=False)
     if optional_missing:
         report['optional_sources_absent'] = optional_missing
+    if optional_groups_skipped:
+        report['optional_source_groups_skipped'] = optional_groups_skipped
     (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(archive)
 

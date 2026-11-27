@@ -48,7 +48,7 @@ class SourceStoragePackageTests(unittest.TestCase):
             with mock.patch.dict(MODULE.os.environ, {'UNIXNU_DEVICE': str(device)}):
                 self.assertEqual(MODULE.resolve_device(tree), device.resolve())
 
-    def test_optional_sources_are_reported_without_failing_lookup(self):
+    def test_incomplete_optional_group_is_not_partially_selected(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tree = root / 'tree'
@@ -56,13 +56,34 @@ class SourceStoragePackageTests(unittest.TestCase):
             package = device / 'package'
             package.mkdir(parents=True)
             (package / 'BootProcessProbe.c').write_text('/* present */\n')
-            present, missing = MODULE.optional_ios27_sources(
+            present, missing, skipped = MODULE.optional_ios27_sources(
                 MODULE.package_dirs_for(tree, device), device, tree)
-            self.assertEqual(present, [package / 'BootProcessProbe.c'])
+            self.assertEqual(present, [])
             self.assertEqual(missing, [
                 'BootUiTraceProbe.c', 'BootProcessWorker.c', 'BootDiagExport.c',
-                'WifiFirmware.c', 'BluetoothFirmware.c',
+                'BootLatencyTrace.h', 'BootLatencyFiles.h', 'TouchTrace.h',
+                'WifiFirmware.c', 'WifiFirmware.h', 'BluetoothFirmware.c',
+                'BluetoothFirmware.h',
             ])
+            self.assertEqual(skipped, ['boot-process-capture'])
+
+    def test_complete_optional_group_is_selected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tree = root / 'tree'
+            device = root / 'device'
+            package = device / 'package'
+            package.mkdir(parents=True)
+            for name in ('BootProcessProbe.c', 'BootUiTraceProbe.c', 'BootProcessWorker.c'):
+                (package / name).write_text('/* present */\n')
+            present, missing, skipped = MODULE.optional_ios27_sources(
+                MODULE.package_dirs_for(tree, device), device, tree)
+            self.assertEqual(present, [
+                package / 'BootProcessProbe.c',
+                package / 'BootUiTraceProbe.c',
+                package / 'BootProcessWorker.c',
+            ])
+            self.assertNotIn('boot-process-capture', skipped)
 
     def test_boot_log_stubs_and_real_boot_reset_are_discovered(self):
         with tempfile.TemporaryDirectory() as temporary:
