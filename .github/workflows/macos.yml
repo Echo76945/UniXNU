@@ -39,28 +39,16 @@ on:
         description: IPSW URL (empty uses board.toml)
         required: false
         default: ""
-      pre_build:
-        description: Optional shell commands run in the UniXNU checkout before the kernel build
+      input_bundle_asset:
+        description: Encrypted release asset containing the trust cache and Data seed (required for payload)
         required: false
         default: ""
-      trust_cache_url:
-        description: Trust cache bundle URL (optional; masked in the logs)
+      input_bundle_tag:
+        description: Immutable release tag containing input_bundle_asset
         required: false
-        default: ""
+        default: muyu-ipados27-inputs
       owner_trust_cache:
-        description: Treat the trust cache URL as an owner-signed bundle
-        type: boolean
-        default: false
-      data_seed_url:
-        description: Data seed URL (optional; masked in the logs)
-        required: false
-        default: ""
-      grow_gib:
-        description: Grow the Data seed to this many GiB (optional)
-        required: false
-        default: ""
-      skip_setup:
-        description: Mark Setup as done in the Data seed
+        description: Treat the bundled trust cache as an owner-signed bundle
         type: boolean
         default: false
 
@@ -108,6 +96,7 @@ jobs:
           ref: ${{ inputs.device_ref }}
           path: device
           token: ${{ secrets.UNIXNU_DEVICE_TOKEN || github.token }}
+          persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -118,26 +107,25 @@ jobs:
         env:
           HAS_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID != '' }}
           OWNER_TRUST_CACHE: ${{ inputs.owner_trust_cache }}
-          GROW_GIB: ${{ inputs.grow_gib }}
-          SKIP_SETUP: ${{ inputs.skip_setup }}
+          INPUT_BUNDLE_ASSET: ${{ inputs.input_bundle_asset }}
+          INPUT_BUNDLE_TAG: ${{ inputs.input_bundle_tag }}
+          HAS_PASSPHRASE: ${{ secrets.MUYU_DATA_SEED_PASSPHRASE != '' }}
         run: |
           python3 scripts/unixnu/test_boot_template.py
-          # The URLs can carry access tokens and the logs of a public repository are public: read them from the
-          # event payload, never from step environments, and mask them before any later step prints its env.
-          trust_cache_url=$(jq -r '.inputs.trust_cache_url // ""' "$GITHUB_EVENT_PATH")
-          data_seed_url=$(jq -r '.inputs.data_seed_url // ""' "$GITHUB_EVENT_PATH")
-          if [ -n "$trust_cache_url" ]; then echo "::add-mask::$trust_cache_url"; fi
-          if [ -n "$data_seed_url" ]; then echo "::add-mask::$data_seed_url"; fi
           fail() { echo "::error::$1"; exit 1; }
           [ -f device/board.toml ] || fail "the device repository has no board.toml"
           [ -f "device/configs/$DEFCONFIG" ] || fail "device/configs/$DEFCONFIG not found: $(cd device/configs 2>/dev/null && printf '%s ' *_defconfig)"
           [ -d "$DEVELOPER_DIR" ] || fail "Xcode not found at $DEVELOPER_DIR; installed: $(printf '%s ' /Applications/Xcode_*.app)"
-          if [ -n "$GROW_GIB" ] && ! [[ "$GROW_GIB" =~ ^[0-9]+$ ]]; then fail "grow_gib must be a whole number of GiB"; fi
-          if [ -n "$GROW_GIB" ] && [ -z "$data_seed_url" ]; then fail "grow_gib needs data_seed_url"; fi
-          if [ "$SKIP_SETUP" = true ] && [ -z "$data_seed_url" ]; then fail "skip_setup needs data_seed_url"; fi
-          if [ "$OWNER_TRUST_CACHE" = true ] && [ -z "$trust_cache_url" ]; then fail "owner_trust_cache needs trust_cache_url"; fi
-          if [[ "$STEPS" != *payload* ]] && { [ -n "$trust_cache_url" ] || [ -n "$data_seed_url" ] || [ "$SKIP_SETUP" = true ]; }; then
-            fail "trust_cache_url, data_seed_url and skip_setup only apply to the payload step"
+          if [[ "$STEPS" == *payload* ]] && [ -z "$INPUT_BUNDLE_ASSET" ]; then
+            fail "payload builds need input_bundle_asset"
+          fi
+          if [ -n "$INPUT_BUNDLE_ASSET" ]; then
+            [[ "$INPUT_BUNDLE_ASSET" =~ ^[A-Za-z0-9._-]+$ ]] || fail "input_bundle_asset contains unsupported characters"
+            [[ "$INPUT_BUNDLE_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || fail "input_bundle_tag contains unsupported characters"
+            [ "$HAS_PASSPHRASE" = true ] || fail "input_bundle_asset needs the MUYU_DATA_SEED_PASSPHRASE secret"
+          fi
+          if [[ "$STEPS" != *payload* ]] && { [ -n "$INPUT_BUNDLE_ASSET" ] || [ "$OWNER_TRUST_CACHE" = true ]; }; then
+            fail "input_bundle_asset and owner_trust_cache only apply to the payload step"
           fi
           python3 - <<'PY'
           import os, sys
@@ -180,7 +168,7 @@ jobs:
           "$(brew --prefix llvm)/bin/clang" --version | head -n 1
           python3 --version
           missing=0
-          for tool in git make clang cmake ninja unifdef ld.lld mformat mcopy dtc xcodebuild; do
+          for tool in git make clang cmake ninja unifdef ld.lld mformat mcopy dtc xcodebuild openssl; do
             path=$(command -v "$tool" || true)
             printf '%-10s %s\n' "$tool" "${path:-MISSING}"
             [ -n "$path" ] || missing=1
@@ -191,31 +179,25 @@ jobs:
       - name: Prepare inputs
         if: contains(inputs.steps, 'payload')
         env:
-          GROW_GIB: ${{ inputs.grow_gib }}
+          INPUT_BUNDLE_ASSET: ${{ inputs.input_bundle_asset }}
+          INPUT_BUNDLE_TAG: ${{ inputs.input_bundle_tag }}
+          PASSPHRASE: ${{ secrets.MUYU_DATA_SEED_PASSPHRASE }}
         run: |
-          trust_cache_url=$(jq -r '.inputs.trust_cache_url // ""' "$GITHUB_EVENT_PATH")
-          data_seed_url=$(jq -r '.inputs.data_seed_url // ""' "$GITHUB_EVENT_PATH")
-          if [ -n "$trust_cache_url" ]; then
-            curl -fsSL --retry 3 "$trust_cache_url" -o "$RUNNER_TEMP/trustcache"
-          fi
-          if [ -n "$data_seed_url" ]; then
-            curl -fsSL --retry 3 "$data_seed_url" -o "$RUNNER_TEMP/data.dbr"
-            if [ -n "$GROW_GIB" ]; then
-              # seed-data-grow.py imports drivers/DarwinBoot/Test and keeps its scratch image in build/.
-              git submodule update --init --depth 1 drivers/DarwinBoot
-              mkdir -p build
-              python3 scripts/seed-data-grow.py --gib "$GROW_GIB" "$RUNNER_TEMP/data.dbr" "$RUNNER_TEMP/data-grow.dbr"
-              mv "$RUNNER_TEMP/data-grow.dbr" "$RUNNER_TEMP/data.dbr"
-            fi
-          fi
-
-      - name: Run pre-build steps
-        if: inputs.pre_build != ''
-        env:
-          PRE_BUILD: ${{ inputs.pre_build }}
-          DEVICE_DIR: ${{ github.workspace }}/device
-          GITHUB_TOKEN: ${{ github.token }}
-        run: bash -euo pipefail -c "$PRE_BUILD"
+          umask 077
+          bundle="$RUNNER_TEMP/muyu-inputs.tar.gz.enc"
+          bundle_hmac="$bundle.hmac"
+          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${INPUT_BUNDLE_TAG}/${INPUT_BUNDLE_ASSET}"
+          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "$bundle" "$release_url"
+          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "$bundle_hmac" "$release_url.hmac"
+          python3 scripts/muyu-input-bundle.py unpack \
+            --bundle "$bundle" \
+            --hmac "$bundle_hmac" \
+            --output-dir "$RUNNER_TEMP/muyu-inputs" \
+            --expected-asset "$INPUT_BUNDLE_ASSET" \
+            --expected-tag "$INPUT_BUNDLE_TAG" \
+            --passphrase-env PASSPHRASE
+          mv "$RUNNER_TEMP/muyu-inputs/trustcache" "$RUNNER_TEMP/trustcache"
+          mv "$RUNNER_TEMP/muyu-inputs/data.dbr" "$RUNNER_TEMP/data.dbr"
 
       - name: Build kernel
         id: kernel
@@ -237,7 +219,6 @@ jobs:
         if: contains(inputs.steps, 'payload')
         env:
           UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
-          SKIP_SETUP: ${{ inputs.skip_setup }}
           OWNER_TRUST_CACHE: ${{ inputs.owner_trust_cache }}
         run: |
           args=()
@@ -249,7 +230,6 @@ jobs:
             fi
           fi
           if [ -f "$RUNNER_TEMP/data.dbr" ]; then args+=(--data-ramdisk "$RUNNER_TEMP/data.dbr"); fi
-          if [ "$SKIP_SETUP" = true ]; then args+=(--skip-setup); fi
           ./unixnu build payload "${args[@]}"
 
       - name: Collect the text logs
@@ -260,7 +240,7 @@ jobs:
           BOARD: ${{ steps.check.outputs.board }}
           WORK: ${{ steps.check.outputs.work }}
         run: |
-          # Only *.log files are copied, with the secrets and the input URLs replaced. Kernels, payloads, disk images,
+          # Only *.log files are copied, with secrets and tokenized URLs redacted. Kernels, payloads, disk images,
           # kernelcaches and IPSW members are never uploaded: they derive from Apple software.
           python3 - <<'PY'
           import os, re, shutil
@@ -269,10 +249,7 @@ jobs:
           target = Path(os.environ['RUNNER_TEMP']) / 'public-logs'
           shutil.rmtree(target, ignore_errors=True)
           target.mkdir(parents=True)
-          event = Path(os.environ['GITHUB_EVENT_PATH']).read_text()
-          import json
-          inputs = json.loads(event).get('inputs', {})
-          secrets = [os.environ.get('UNIXNU_UNIQUE_CHIP_ID', ''), inputs.get('trust_cache_url', ''), inputs.get('data_seed_url', '')]
+          secrets = [os.environ.get('UNIXNU_UNIQUE_CHIP_ID', '')]
           secrets = [value for value in secrets if value]
           count = 0
           for path in sorted(source.glob('*.log')) if source.is_dir() else []:
@@ -322,4 +299,6 @@ jobs:
         if: always()
         run: |
           rm -rf out/ipsw out/feeds device/.cache/firmware out/*/tree/.cache/firmware out/*/payload/data-skip-setup-* out/*/*/*/tree/.cache/firmware out/*/*/*/payload/data-skip-setup-*
-          rm -f "$RUNNER_TEMP/trustcache" "$RUNNER_TEMP/data.dbr" "$RUNNER_TEMP/data-grow.dbr"
+          rm -rf "$RUNNER_TEMP/muyu-inputs" "$RUNNER_TEMP/muyu-inputs.tar.gz"
+          rm -f "$RUNNER_TEMP/trustcache" "$RUNNER_TEMP/data.dbr" \
+            "$RUNNER_TEMP/muyu-inputs.tar.gz.enc" "$RUNNER_TEMP/muyu-inputs.tar.gz.enc.hmac"

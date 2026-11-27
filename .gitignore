@@ -28,6 +28,8 @@ __pycache__/
 *.dSYM/
 
 # Inputs, images and products that never belong in Git
+*.enc
+*.hmac
 *.ipsw
 *.dmg
 *.im4p
