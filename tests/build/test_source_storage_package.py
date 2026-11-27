@@ -102,6 +102,14 @@ class SourceStoragePackageTests(unittest.TestCase):
             self.assertEqual(
                 MODULE.find_device_source('BootReset.c', directories, device, tree), reset)
 
+    def test_source_storage_defaults_cover_arm64e_weak_addresses(self):
+        text = MODULE.source_storage_link_defaults()
+        self.assertIn('int native_ufs_store_write_cached(', text)
+        self.assertIn('return native_ufs_store_write(', text)
+        self.assertIn('bool ml_static_mfree_prepare(', text)
+        self.assertIn('void (*arm64_platform_sleep_hook)(boolean_t boot_cpu);', text)
+        self.assertEqual(text.count('__attribute__((weak, visibility("hidden")))'), 3)
+
 
 if __name__ == '__main__':
     unittest.main()

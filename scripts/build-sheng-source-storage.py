@@ -63,6 +63,47 @@ def weak_defaults(source):
     return '\n'.join(includes + pragma + lines) + '\n'
 
 
+def source_storage_link_defaults():
+    """Definitions for optional imports whose addresses the source closure uses.
+
+    A static arm64e kernel cannot leave an unresolved weak import behind when
+    another object takes its address. These are capability boundaries, not
+    implementations:
+
+    * Loader memory is kept when the kernel has no ml_static_mfree_prepare().
+    * The platform sleep slot exists but has no caller in the M1-M3 profile;
+      its kernel boot argument stays off.
+    * Cached Data writes fall back to the FUA write already supplied by
+      NativeUfs, which is slower but preserves the durability contract.
+    """
+    return '''\
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+typedef int boolean_t;
+
+extern int native_ufs_store_write(uint64_t, uint32_t, const void *);
+
+__attribute__((weak, visibility("hidden")))
+int native_ufs_store_write_cached(uint64_t block, uint32_t count, const void *source)
+{
+    return native_ufs_store_write(block, count, source);
+}
+
+__attribute__((weak, visibility("hidden")))
+bool ml_static_mfree_prepare(uintptr_t vaddr, size_t size)
+{
+    (void)vaddr;
+    (void)size;
+    return false;
+}
+
+__attribute__((weak, visibility("hidden")))
+void (*arm64_platform_sleep_hook)(boolean_t boot_cpu);
+'''
+
+
 def resolve_device(tree, explicit=None):
     """Resolve the device checkout independently of the assembled source tree."""
     return Path(explicit or os.environ.get('UNIXNU_DEVICE') or tree).resolve()
@@ -219,6 +260,8 @@ def main():
     # signed hash tables are a separate firmware handoff, authenticated in XNU.
     boot_log_defaults = out / 'BootLogDefaults.c'
     boot_log_defaults.write_text(weak_defaults(device_source('BootLog.c')))
+    source_storage_defaults = out / 'SourceStorageDefaults.c'
+    source_storage_defaults.write_text(source_storage_link_defaults())
     anchor = out / 'RootAnchor.c'
     anchor.write_text('#include <stdint.h>\nconst uint8_t verified_root_key[395] = {' +
                       ','.join(str(b) for b in key) + '};\n')
@@ -258,7 +301,7 @@ OSDefineOperatorMethods(IOBlockStorageDevice)
     sources = [base, device / 'drivers/ShengUfs/NativeUfs.cpp', ROOT / 'drivers/RamBlock/NativeRamBlock.cpp',
                device_source('SourceStorage.cpp'), device_source('SourceRootPolicies.cpp'),
                device_source('SourceRootBinding.cpp'), device_source('BootLog.c'), boot_log_defaults,
-               device_source('BootLogStubs.c'),
+               device_source('BootLogStubs.c'), source_storage_defaults,
                ROOT / 'kits/VerifiedRoot/src/verified_root.c',
                ROOT / 'kits/VerifiedRoot/adapters/xnu_crypto.c', anchor]
     optional_missing = []
