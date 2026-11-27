@@ -84,7 +84,10 @@ jobs:
           python-version: "3.13"
 
       - name: Install the AEA key tool
-        run: brew install blacktop/tap/ipsw
+        run: |
+          # The tap now publishes both a formula and a cask. Homebrew selected the cask in the
+          # first run and rejected that tap's zap stanza, so pin the formula explicitly.
+          brew install --formula blacktop/tap/ipsw
 
       - name: Fetch and decrypt the OS disk image
         id: os-image
