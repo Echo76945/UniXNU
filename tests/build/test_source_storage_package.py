@@ -64,7 +64,7 @@ class SourceStoragePackageTests(unittest.TestCase):
                 'WifiFirmware.c', 'BluetoothFirmware.c',
             ])
 
-    def test_boot_log_stubs_satisfy_the_optional_link_boundary(self):
+    def test_boot_log_stubs_and_real_boot_reset_are_discovered(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tree = root / 'tree'
@@ -72,12 +72,14 @@ class SourceStoragePackageTests(unittest.TestCase):
             package = device / 'package'
             package.mkdir(parents=True)
             stubs = package / 'BootLogStubs.c'
+            reset = package / 'BootReset.c'
             stubs.write_text('/* weak board helpers */\n')
+            reset.write_text('/* board reset implementation */\n')
             directories = MODULE.package_dirs_for(tree, device)
             self.assertEqual(
                 MODULE.find_device_source('BootLogStubs.c', directories, device, tree), stubs)
-            self.assertIsNone(
-                MODULE.find_device_source('BootReset.c', directories, device, tree))
+            self.assertEqual(
+                MODULE.find_device_source('BootReset.c', directories, device, tree), reset)
 
 
 if __name__ == '__main__':
