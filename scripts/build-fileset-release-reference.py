@@ -12,8 +12,7 @@ import subprocess
 
 
 REFERENCE_STUB_PATTERN = re.compile(
-    r'^\s+"(_(?:native_[a-z0-9_]+|boot_log_[a-z0-9_]+|boot_cache_input_capture|'
-    r'corecrypto_kext_start))"', re.M)
+    r'^\s+"(_(?:native_[a-z0-9_]+|boot_log_[a-z0-9_]+|boot_cache_input_capture))"', re.M)
 
 
 def file_hash(path):
@@ -188,18 +187,8 @@ def main():
                        result.returncode, build_log, output / f'{mode}-build.log')
     stub_names = reference_stub_names(build_log)
     if stub_names:
-        definitions = []
-        for name in stub_names:
-            if name == '_corecrypto_kext_start':
-                # The comparison image never loads the source provider. Give this
-                # one bootstrap entrypoint the exact kern_return_t ABI while the
-                # other, layout-only hooks remain plain symbols.
-                definitions.append(
-                    'int corecrypto_kext_start(void *module, void *data) '
-                    '{ (void)module; (void)data; return 0; }\n')
-            else:
-                definitions.append(f'long {name[1:]};\n')
-        (output / 'reference-stubs.c').write_text(''.join(definitions))
+        (output / 'reference-stubs.c').write_text(
+            ''.join(f'long {name[1:]};\n' for name in stub_names))
         iphoneos = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
         subprocess.run(['xcrun', 'clang', '-arch', 'arm64e', '-mkernel', '-isysroot', iphoneos, '-c',
                         '-o', str(output / 'reference-stubs.o'), str(output / 'reference-stubs.c')], check=True)

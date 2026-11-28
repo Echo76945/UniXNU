@@ -21,6 +21,7 @@ from xnu_symbols import kernel_names
 SOURCE = ROOT / 'refer/corecrypto-2023'
 REVISION = '11fba65b12d8830630e248dfa8344caf8b065f26'
 OUT = ROOT / 'build/corecrypto-2023'
+PROVIDER_ENTRYPOINT = '_corecrypto_kext_start'
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--namespace', action='store_true', help='Isolate provider globals from XNU crypto wrappers')
 args = parser.parse_args()
@@ -83,16 +84,26 @@ command = ['xcrun', '--sdk', 'iphoneos', 'clang', '-target', TRIPLE, '-isysroot'
 for folder in sorted({h.parent for h in SOURCE.rglob('*.h') if 'test' not in str(h.relative_to(SOURCE)).lower()}):
     command.extend(['-I', str(folder)])
 variant = '-namespaced' if args.namespace else ''
+namespace_collisions = []
 if args.namespace:
     plain = OUT / 'libcorecrypto_kernel_noasm.a'
     if not plain.is_file():
         raise SystemExit('Build the plain provider once before creating its namespace')
-    collisions = sorted(names(plain, '-U') & kernel_names(ROOT))
-    if any(not name[1:].isidentifier() for name in collisions):
+    plain_defined = names(plain, '-U')
+    if PROVIDER_ENTRYPOINT not in plain_defined:
+        raise SystemExit(f'The plain provider archive does not define {PROVIDER_ENTRYPOINT}')
+    namespace_collisions = sorted(plain_defined & kernel_names(ROOT))
+    isolated_collisions = [name for name in namespace_collisions if name != PROVIDER_ENTRYPOINT]
+    if any(not name[1:].isidentifier() for name in isolated_collisions):
         raise SystemExit('A colliding symbol cannot be namespaced with a C identifier')
     header = OUT / 'namespace.h'
-    header.write_text(''.join(f'#define {name[1:]} cc14_{name[1:]}\n' for name in collisions))
+    # The kernel bootstrap calls this provider entrypoint directly. It is not
+    # interchangeable with an internal wrapper name, so never namespace it.
+    header.write_text(''.join(f'#define {name[1:]} cc14_{name[1:]}\n'
+                              for name in isolated_collisions))
     command.extend(['-include', str(header)])
+    print(f'Namespace collisions: {len(namespace_collisions)}; '
+          f'retaining {PROVIDER_ENTRYPOINT} as the provider entrypoint', flush=True)
 (OUT / f'compile-command{variant}.json').write_text(json.dumps(command, indent=2) + '\n')
 object_dir = OUT / f'objects{variant}'
 object_dir.mkdir(exist_ok=True)
@@ -129,16 +140,23 @@ archive = OUT / f'libcorecrypto_kernel_noasm{variant}.a'
 archive.unlink(missing_ok=True)
 subprocess.run(['xcrun', 'ar', 'rcs', archive, *[object_dir / result['object'] for result in results]], check=True)
 defined = names(archive, '-U')
+if PROVIDER_ENTRYPOINT not in defined:
+    raise SystemExit(f'The provider archive does not define {PROVIDER_ENTRYPOINT}')
 undefined = names(archive, '-u') - defined
 kernel_exports = kernel_names(ROOT)
 survey = {'unresolved_external_names': sorted(undefined), 'missing_kernel_names': sorted(undefined - kernel_exports),
           'duplicate_kernel_names': sorted(defined & kernel_exports), 'provider_registered': False,
-          'abi_compatibility_proven': False}
+          'abi_compatibility_proven': False, 'provider_entrypoint': PROVIDER_ENTRYPOINT,
+          'provider_entrypoint_defined': True, 'namespace_collisions': namespace_collisions}
 (OUT / f'link-survey{variant}.json').write_text(json.dumps(survey, indent=2) + '\n')
 report['object_architecture_and_deployment_audited'] = len(results)
 report['archive_sha256'] = hashlib.sha256(archive.read_bytes()).hexdigest()
 report['namespace_isolated'] = args.namespace
+report['namespace_collisions'] = namespace_collisions
+report['provider_entrypoint'] = PROVIDER_ENTRYPOINT
+report['provider_entrypoint_defined'] = True
 (OUT / f'build-report{variant}.json').write_text(json.dumps(report, indent=2) + '\n')
 print(f'Internal unregistered provider archive: {archive.name}')
+print(f'Provider entrypoint retained: {PROVIDER_ENTRYPOINT}')
 print(f'External names absent from kernel: {survey["missing_kernel_names"]}')
 print(f'Globals shared with kernel: {len(survey["duplicate_kernel_names"])}; initialization and intact selftests are still required')

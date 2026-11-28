@@ -28,7 +28,6 @@ class ReferenceCacheTests(unittest.TestCase):
 '''
         self.assertEqual(reference.reference_stub_names(build_log), [
             '_boot_cache_input_capture',
-            '_corecrypto_kext_start',
             '_native_ram_block_volume_seed',
         ])
 
@@ -113,6 +112,55 @@ class ReferenceCacheTests(unittest.TestCase):
                 self.assertEqual(builds, ['0', '0', '1', '1'])
                 final = root / 'build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf'
                 self.assertEqual(final.read_text(), '1')
+
+    def test_second_link_failure_reports_the_nested_undefined_symbols(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = ['.cache/xnu-work/osfmk/arm64/sleh.c',
+                     '.cache/xnu-work/config/Private.exports',
+                     '.cache/xnu-work/config/Private.arm64.exports',
+                     '.cache/fakeroot/usr/include/header.h',
+                     'build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a',
+                     'build/libpthread-kernel/libpthread_kernel.a',
+                     'build/armdt-platform/libArmDTPlatform.a',
+                     'build/armcpu/libArmCpu.a']
+            for name in files:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('')
+            link_calls = 0
+
+            def fail_links(command, **kwargs):
+                nonlocal link_calls
+                if command[:2] == ['xcrun', 'nm']:
+                    return SimpleNamespace(returncode=0, stdout='')
+                values = dict(arg.split('=', 1) for arg in command if '=' in arg)
+                output = Path(values['OBJROOT']) / 'RELEASE_ARM64_BCM2837'
+                output.mkdir(parents=True, exist_ok=True)
+                (output / 'nonltolink.filelist').write_text('')
+                (output / 'justlto.o').mkdir(exist_ok=True)
+                link_calls += 1
+                diagnostic = (
+                    'Undefined symbols for architecture arm64e:\n'
+                    f'  "_missing_second_link_{link_calls}", referenced from:\n'
+                    '      _source_corecrypto14_bootstrap in prng_random.o\n'
+                    'ld: symbol(s) not found for architecture arm64e\n')
+                kwargs['stdout'].write(diagnostic)
+                nested = output.parent / 'lto-build.log'
+                with nested.open('a') as log:
+                    log.write(diagnostic)
+                return SimpleNamespace(returncode=2)
+
+            argv = ['reference', '--tree', str(root), '--lto']
+            with patch.object(reference.subprocess, 'run', side_effect=fail_links), \
+                    patch.object(reference.subprocess, 'check_output', return_value='compiler'), \
+                    patch('sys.argv', argv):
+                with self.assertRaises(SystemExit) as stopped:
+                    reference.main()
+            self.assertEqual(link_calls, 2)
+            self.assertIn('RELEASE reference second link failed (2)', str(stopped.exception))
+            self.assertIn('_missing_second_link_2', str(stopped.exception))
+            self.assertIn('lto-build.log', str(stopped.exception))
 
     def test_old_snapshot_cannot_satisfy_lto_request(self):
         with tempfile.TemporaryDirectory() as directory:
