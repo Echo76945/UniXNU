@@ -41,6 +41,11 @@ HMAC。集合根头使用原生内核的链接地址，普通预链接的 `--sli
 `native_original_branches` 记录每条绑定。构建脚本不得预先减去缓存的原生内核
 位移；GOT 中的绝对数据指针保持固定值。
 
+24A446 回归策略可以用 `required_original_branches_deferred` 显式延期一条绑定。
+每项必须包含符号、`reason` 和 `restore_when` 恢复条件。延期分支缺失时构建继续，
+但发布记录会标记为 `missing`；分支出现时标记为 `recovered`，并保留 emitter 的
+source、target 和 owner 绑定。同一符号不能同时出现在 active 和 deferred 列表。
+
 默认遇到缺失映射就停止。`--allow-missing` 可以生成实验映像，JSON 报告按
 kext 列出所有未解析目标。结构验证通过后，仍需要补全映射并进行硬件验证，
 才能确认启动兼容性。

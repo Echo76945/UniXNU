@@ -124,5 +124,108 @@ class NativeKernelTests(unittest.TestCase):
                 self.assertEqual(output.with_suffix('.json').read_text(), '{}')
 
 
+class PrelinkRegressionTests(unittest.TestCase):
+    def record(self, *symbols):
+        return {
+            'collection_slide': '0x100',
+            'missing': {},
+            'stubbed': {},
+            'native_original_branches': [{'symbol': symbol} for symbol in symbols],
+        }
+
+    def policy(self, **updates):
+        result = {
+            'missing': {},
+            'stubbed': {},
+            'required_original_branches': [],
+            'required_original_branches_deferred': [],
+        }
+        result.update(updates)
+        return result
+
+    def deferred(self, symbol='adapter', **updates):
+        result = {
+            'symbol': symbol,
+            'reason': 'The current M1 archive set does not contain the adapter.',
+            'restore_when': 'The adapter archive is selected and emits this branch.',
+        }
+        result.update(updates)
+        return result
+
+    def test_active_original_branch_is_still_required(self):
+        with self.assertRaisesRegex(Error, 'required absolute adapter branch relocations: adapter'):
+            kernel.check_prelink_regressions(
+                self.record(), self.policy(required_original_branches=['adapter']))
+
+    def test_missing_deferred_original_branch_is_recorded(self):
+        report = kernel.check_prelink_regressions(
+            self.record(), self.policy(required_original_branches_deferred=[self.deferred()]))
+        self.assertEqual(report['deferred_original_branches'], [{
+            'symbol': 'adapter',
+            'status': 'missing',
+            'reason': 'The current M1 archive set does not contain the adapter.',
+            'restore_when': 'The adapter archive is selected and emits this branch.',
+            'bindings': [],
+        }])
+
+    def test_recovered_deferred_original_branch_keeps_emitter_binding(self):
+        binding = {'symbol': 'adapter', 'source': '0x1000', 'target': '0x2000', 'owner': 'IOKit'}
+        record = self.record()
+        record['native_original_branches'] = [binding]
+        report = kernel.check_prelink_regressions(
+            record, self.policy(required_original_branches_deferred=[self.deferred()]))
+        self.assertEqual(report['deferred_original_branches'][0]['status'], 'recovered')
+        self.assertEqual(report['deferred_original_branches'][0]['bindings'], [binding])
+
+    def test_active_and_deferred_original_branch_overlap_is_rejected(self):
+        with self.assertRaisesRegex(Error, 'both required and deferred: adapter'):
+            kernel.check_prelink_regressions(
+                self.record('adapter'),
+                self.policy(required_original_branches=['adapter'],
+                            required_original_branches_deferred=[self.deferred()]))
+
+    def test_deferred_original_branch_requires_reason_and_restore_condition(self):
+        for field in ('reason', 'restore_when'):
+            with self.subTest(field=field):
+                entry = self.deferred()
+                del entry[field]
+                with self.assertRaisesRegex(Error, field):
+                    kernel.check_prelink_regressions(
+                        self.record(),
+                        self.policy(required_original_branches_deferred=[entry]))
+
+    def test_prelink_persists_regression_summary_in_published_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, cache = root / 'native', root / 'cache'
+            source.write_bytes(b'native')
+            cache.write_bytes(b'cache')
+            policy = root / 'policy.json'
+            policy.write_text(json.dumps(self.policy(
+                kernelcache_sha256=hashlib.sha256(cache.read_bytes()).hexdigest(),
+                required_original_branches_deferred=[self.deferred()])))
+            ctx = SimpleNamespace(
+                tree=root, work=root, logs=root,
+                args=SimpleNamespace(skip_prelink=False),
+                option=lambda *args: cache,
+                board={'kernel': {'prelink': {
+                    'kernel': 'native', 'tool': 'emit.py', 'slide': '0',
+                    'regression_policy': 'policy.json',
+                }}})
+            output = root / 'kernel/kernel.macho'
+
+            def emit(command, **kwargs):
+                candidate = Path(command[command.index('--output') + 1])
+                candidate.with_suffix('.json').write_text(json.dumps(self.record()))
+                candidate.write_bytes(b'new image')
+
+            with patch.object(kernel, 'run', side_effect=emit):
+                kernel.prelink(ctx)
+            report = json.loads(output.with_suffix('.json').read_text())
+            self.assertEqual(
+                report['prelink_regression']['deferred_original_branches'][0]['status'],
+                'missing')
+
+
 if __name__ == '__main__':
     unittest.main()

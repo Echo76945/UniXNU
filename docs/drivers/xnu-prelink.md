@@ -57,6 +57,13 @@ every destination against retained executable ranges. The report records each
 binding in `native_original_branches`. Builders must not pre-subtract a cached
 native slide. Absolute data pointers in GOT entries keep their fixed values.
 
+The 24A446 regression policy can defer a branch explicitly with
+`required_original_branches_deferred`. Each deferred item must include the
+symbol, a `reason`, and a `restore_when` condition. A missing deferred branch
+does not stop the build, but the published record marks it `missing`; if it
+appears, the record marks it `recovered` and retains the emitter's source,
+target, and owner binding. A symbol cannot be both active and deferred.
+
 Missing mappings stop emission by default. `--allow-missing` produces an
 experimental image and the JSON report lists every unresolved target by kext.
 An image that passes structural checks still requires complete mappings and

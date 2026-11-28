@@ -173,4 +173,10 @@ original kernel address and importing component. New gaps fail packaging even
 with `--allow-missing`; this check does not qualify the remaining experimental
 paths or replace a device boot test.
 
+`required_original_branches_deferred` is for reviewed adapter branches that are
+not part of the current archive set. Each item must name its `reason` and
+`restore_when`; the published kernel record reports `missing` or `recovered`,
+including any recovered emitter binding. The active and deferred lists cannot
+overlap.
+
 Kernel updates retain the selected profile's signed root headers and public anchor. `scripts/import-root-policies.py BOOT.img --policies PROFILE_POLICY_DIRECTORY` authenticates and imports them from a verified boot image. The sheng macOS lab uses these inputs when `root_storage=false`. A replacement kernel travels with its matching `kernel.macho.vroot` policy bundle.

@@ -63,6 +63,7 @@ class RuntimeInputs(unittest.TestCase):
             selected.mkdir()
             ctx.modules = {('driver', 'QcaBluetooth'): argparse.Namespace(path=selected)}
             original_seed = Path(ctx.args.data_ramdisk).read_bytes()
+            os_image = Path('/original-os.dmg')
             captured = {}
             def build(command, **kwargs):
                 request = json.loads(Path(command[-1]).read_text())
@@ -71,9 +72,9 @@ class RuntimeInputs(unittest.TestCase):
                               trust_cache=request['trust_cache'])
                 (Path(request['output']) / 'generated.json').write_text(json.dumps(result))
             with patch.object(runtime, 'Ipsw') as source, patch.object(runtime, 'run', side_effect=build):
-                source.return_value.disk_image.return_value = Path('/original-os.dmg')
+                source.return_value.disk_image.return_value = os_image
                 runtime.prepare(ctx, kernel_build=True)
-            self.assertEqual(captured['os_image'], '/original-os.dmg')
+            self.assertEqual(captured['os_image'], str(os_image))
             self.assertEqual(captured['bluetooth_component'], str(selected.resolve()))
             self.assertFalse(captured['init_data'])
             self.assertEqual(Path(ctx.args.data_ramdisk).read_bytes(), original_seed)
@@ -93,6 +94,7 @@ class RuntimeInputs(unittest.TestCase):
             ctx.logs.mkdir()
             ctx.board['payload']['runtime'].update(appsync=True, target='ios27', build='24A446')
             original = Path(ctx.args.data_ramdisk).read_bytes()
+            os_image = Path('/original-os.dmg')
             captured = {}
             def build(command, **kwargs):
                 request = json.loads(Path(command[-1]).read_text())
@@ -100,10 +102,10 @@ class RuntimeInputs(unittest.TestCase):
                 result = {key: request[key] for key in ('data_ramdisk', 'gpu_addon', 'trust_cache')}
                 (Path(request['output']) / 'generated.json').write_text(json.dumps(result))
             with patch.object(runtime, 'Ipsw') as ipsw, patch.object(runtime, 'run', side_effect=build):
-                ipsw.return_value.disk_image.return_value = Path('/original-os.dmg')
+                ipsw.return_value.disk_image.return_value = os_image
                 runtime.prepare(ctx, kernel_build=True)
             self.assertNotIn('appsync_apps', captured)
-            self.assertEqual(captured['os_image'], '/original-os.dmg')
+            self.assertEqual(captured['os_image'], str(os_image))
             self.assertFalse(captured['init_data'])
             self.assertEqual(Path(ctx.args.data_ramdisk).read_bytes(), original)
 
@@ -127,7 +129,8 @@ class RuntimeInputs(unittest.TestCase):
         policy = dict(missing={}, stubbed={'owner': {'0x1000': 1}}, required_original_branches=['adapter'])
         record = dict(collection_slide='0x100', missing={}, stubbed={'owner': {'0x1100': 1}},
                       native_original_branches=[{'symbol': 'adapter'}])
-        check_prelink_regressions(record, policy)
+        compatibility = check_prelink_regressions(record, policy)
+        self.assertEqual(compatibility, {'deferred_original_branches': []})
         worse = copy.deepcopy(record)
         worse['stubbed']['owner']['0x1200'] = 1
         with self.assertRaisesRegex(Error, 'prelink regression'):

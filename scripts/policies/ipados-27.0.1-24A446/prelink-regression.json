@@ -1,9 +1,18 @@
 {
   "kernelcache_sha256": "38e6d9fa5f789b8228f4617ef4c6d2a3fd8ab564abdc9b62920f1db53fc1780a",
   "description": "Remaining unresolved references of the 24A446 startup baseline. This bounds regressions, not runtime qualification.",
-  "required_original_branches": [
-    "__ZN25IOMobileFramebufferLegacyC2EPK11OSMetaClass",
-    "__ZN11IOHIDDevice10handleOpenEP9IOServicejPv"
+  "required_original_branches": [],
+  "required_original_branches_deferred": [
+    {
+      "symbol": "__ZN25IOMobileFramebufferLegacyC2EPK11OSMetaClass",
+      "reason": "The reproducible M1 archive set does not contain the display adapter that emits this original branch.",
+      "restore_when": "The NativeLegacyDisplay archive is present in kernel.archives and emits this original branch."
+    },
+    {
+      "symbol": "__ZN11IOHIDDevice10handleOpenEP9IOServicejPv",
+      "reason": "The reproducible M1 archive set does not contain the HID adapter that emits this original branch.",
+      "restore_when": "The ShengHidInput archive is present in kernel.archives and emits this original branch."
+    }
   ],
   "missing": {
     "com.apple.driver.AppleARMWatchdogTimer": {
