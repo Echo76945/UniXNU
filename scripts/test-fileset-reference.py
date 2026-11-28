@@ -15,6 +15,50 @@ spec.loader.exec_module(reference)
 
 
 class ReferenceCacheTests(unittest.TestCase):
+    def test_only_known_comparison_symbols_are_stubbed(self):
+        build_log = '''Undefined symbols for architecture arm64e:
+  "_corecrypto_kext_start", referenced from:
+      _source_corecrypto14_bootstrap in prng_random.o
+  "_native_ram_block_volume_seed", referenced from:
+      _load_init_program in kern_exec.o
+  "_boot_cache_input_capture", referenced from:
+      _boot_cache_init in bsd_init.o
+  "_unexpected_symbol", referenced from:
+      _bug in bug.o
+'''
+        self.assertEqual(reference.reference_stub_names(build_log), [
+            '_boot_cache_input_capture',
+            '_corecrypto_kext_start',
+            '_native_ram_block_volume_seed',
+        ])
+
+    def test_link_diagnostic_reports_only_the_undefined_symbol_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'build.log'
+            log.write_text('prefix noise\n'
+                           'Undefined symbols for architecture arm64e:\n'
+                           '  "_corecrypto_kext_start", referenced from:\n'
+                           '      _source_corecrypto14_bootstrap in prng_random.o\n'
+                           'ld: symbol(s) not found for architecture arm64e\n'
+                           'make: *** [build_all] Error 2\n')
+            detail = reference.link_diagnostic(log)
+            self.assertIn('"_corecrypto_kext_start"', detail)
+            self.assertNotIn('prefix noise', detail)
+            self.assertNotIn('make: ***', detail)
+
+    def test_latest_nested_link_log_uses_the_isolated_build_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            older = root / 'lto-old/lto-build.log'
+            newer = root / 'lto-new/lto-build.log'
+            older.parent.mkdir()
+            newer.parent.mkdir()
+            older.write_text('old')
+            newer.write_text('new')
+            os.utime(older, (1, 1))
+            os.utime(newer, (2, 2))
+            self.assertEqual(reference.latest_nested_link_log(root), newer)
+
     def test_lto_filelist_paths_are_relative_to_the_object_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -98,7 +142,12 @@ class ReferenceCacheTests(unittest.TestCase):
             self.assertNotEqual(first, reference.tree_hash(source))
             sdk = root / 'sdk'
             sdk.mkdir()
-            (sdk / 'include').symlink_to(source, target_is_directory=True)
+            try:
+                (sdk / 'include').symlink_to(source, target_is_directory=True)
+            except OSError as error:
+                if os.name == 'nt' and getattr(error, 'winerror', None) == 1314:
+                    self.skipTest('Windows symlink privilege is not available')
+                raise
             first = reference.tree_hash(sdk)
             header.write_text('next')
             self.assertNotEqual(first, reference.tree_hash(sdk))

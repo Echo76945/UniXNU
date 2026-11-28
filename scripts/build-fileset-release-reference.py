@@ -11,6 +11,11 @@ from pathlib import Path
 import subprocess
 
 
+REFERENCE_STUB_PATTERN = re.compile(
+    r'^\s+"(_(?:native_[a-z0-9_]+|boot_log_[a-z0-9_]+|boot_cache_input_capture|'
+    r'corecrypto_kext_start))"', re.M)
+
+
 def file_hash(path):
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -52,6 +57,31 @@ def linked_objects(directory, lto):
                     if (directory / name).is_file()]
     return [str(Path(name) if Path(name).is_absolute() else directory / name)
             for name in objects if name.strip()]
+
+
+def reference_stub_names(build_log):
+    """Symbols that need an explicit definition in the non-executing comparison image."""
+    return sorted(set(REFERENCE_STUB_PATTERN.findall(build_log)))
+
+
+def latest_nested_link_log(output):
+    """Return the newest linker log written below an isolated reference build."""
+    logs = sorted(output.rglob('lto-build.log'), key=lambda path: path.stat().st_mtime_ns)
+    return logs[-1] if logs else None
+
+
+def link_diagnostic(log_path, limit=80):
+    """Return the final linker failure instead of only the wrapper's exit line."""
+    text = log_path.read_text(errors='replace')
+    marker = 'Undefined symbols for architecture'
+    start = text.rfind(marker)
+    if start >= 0:
+        end_marker = 'ld: symbol(s) not found'
+        end = text.find(end_marker, start)
+        end = len(text) if end < 0 else end + len(end_marker)
+        return text[start:end].strip()
+    lines = text.splitlines()
+    return '\n'.join(lines[-limit:]).strip()
 
 
 def require_link_phase(directory, lto, returncode, build_log, log_path):
@@ -145,20 +175,36 @@ def main():
     with (output/f'{mode}-build.log').open('w') as log:
         result = subprocess.run(args,cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT)
     print('RELEASE reference exit',result.returncode,'log',output/f'{mode}-build.log',flush=True)
+    first_link_log = latest_nested_link_log(output) if result.returncode else None
+    if result.returncode:
+        detail_log = first_link_log or output / f'{mode}-build.log'
+        print('final linker log', detail_log, flush=True)
+        print(link_diagnostic(detail_log), flush=True)
     # The bring-up patch calls native hooks from the kernel core behind weak_import declarations; on arm64e
     # the authenticated pointer of an undefined weak symbol fails the link. The private copy stubs them: this
     # comparison kernel never runs, the prelink step reads its layout.
     build_log = (output / f'{mode}-build.log').read_text()
     require_link_phase(output / f'{mode}-obj/RELEASE_ARM64_BCM2837', options.lto,
                        result.returncode, build_log, output / f'{mode}-build.log')
-    stub_names = sorted(set(re.findall(r'^\s+"(_(?:native_[a-z0-9_]+|boot_log_[a-z0-9_]+|boot_cache_input_capture))"', build_log, re.M)))
+    stub_names = reference_stub_names(build_log)
     if stub_names:
-        (output / 'native-stubs.c').write_text(''.join(f'long {name[1:]};\n' for name in stub_names))   # the linker names carry the leading underscore
+        definitions = []
+        for name in stub_names:
+            if name == '_corecrypto_kext_start':
+                # The comparison image never loads the source provider. Give this
+                # one bootstrap entrypoint the exact kern_return_t ABI while the
+                # other, layout-only hooks remain plain symbols.
+                definitions.append(
+                    'int corecrypto_kext_start(void *module, void *data) '
+                    '{ (void)module; (void)data; return 0; }\n')
+            else:
+                definitions.append(f'long {name[1:]};\n')
+        (output / 'reference-stubs.c').write_text(''.join(definitions))
         iphoneos = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
         subprocess.run(['xcrun', 'clang', '-arch', 'arm64e', '-mkernel', '-isysroot', iphoneos, '-c',
-                        '-o', str(output / 'native-stubs.o'), str(output / 'native-stubs.c')], check=True)
+                        '-o', str(output / 'reference-stubs.o'), str(output / 'reference-stubs.c')], check=True)
         at = next(i for i, a in enumerate(args) if a.startswith('LD_KERNEL_ARCHIVES='))
-        args[at] += f' -Wl,-force_load,{output}/native-stubs.o'
+        args[at] += f' -Wl,-force_load,{output}/reference-stubs.o'
     # Forced exports the built objects cannot provide: remove them from this private copy and link again
     # (the symbols are absent from the comparison kernel either way; the first link can stop exactly there,
     # and its file list is what names the objects that were built).
@@ -185,7 +231,13 @@ def main():
         result = subprocess.run(args, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
     print('RELEASE reference exit', result.returncode, 'log', output / f'{mode}-build.log', flush=True)
     if result.returncode:
-        raise SystemExit(result.returncode)
+        detail_log = latest_nested_link_log(output) or output / f'{mode}-build.log'
+        print('final linker log', detail_log, flush=True)
+        print(link_diagnostic(detail_log), flush=True)
+        raise SystemExit(f'RELEASE reference second link failed ({result.returncode}); '
+                         f'log {output / f"{mode}-build.log"}\n'
+                         f'nested log {detail_log}\n'
+                         f'{link_diagnostic(detail_log)}')
     built = output / f'{mode}-obj/RELEASE_ARM64_BCM2837/mach.release.bcm2837.unstripped'
     temporary = final.with_suffix('.tmp')
     shutil.copyfile(built, temporary)
