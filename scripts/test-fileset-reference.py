@@ -21,12 +21,15 @@ class ReferenceCacheTests(unittest.TestCase):
       _source_corecrypto14_bootstrap in prng_random.o
   "_native_ram_block_volume_seed", referenced from:
       _load_init_program in kern_exec.o
+  "_arm64_platform_sleep_hook", referenced from:
+      ArmCpu::start(IOService*) in libArmCpu.a(ArmCpu.o)
   "_boot_cache_input_capture", referenced from:
       _boot_cache_init in bsd_init.o
   "_unexpected_symbol", referenced from:
       _bug in bug.o
 '''
         self.assertEqual(reference.reference_stub_names(build_log), [
+            '_arm64_platform_sleep_hook',
             '_boot_cache_input_capture',
             '_native_ram_block_volume_seed',
         ])

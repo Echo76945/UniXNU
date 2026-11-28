@@ -12,7 +12,8 @@ import subprocess
 
 
 REFERENCE_STUB_PATTERN = re.compile(
-    r'^\s+"(_(?:native_[a-z0-9_]+|boot_log_[a-z0-9_]+|boot_cache_input_capture))"', re.M)
+    r'^\s+"(_(?:native_[a-z0-9_]+|boot_log_[a-z0-9_]+|boot_cache_input_capture|'
+    r'arm64_platform_sleep_hook))"', re.M)
 
 
 def file_hash(path):
