@@ -138,7 +138,6 @@ class PrelinkRegressionTests(unittest.TestCase):
             'missing': {},
             'stubbed': {},
             'required_original_branches': [],
-            'required_original_branches_deferred': [],
         }
         result.update(updates)
         return result
@@ -148,6 +147,7 @@ class PrelinkRegressionTests(unittest.TestCase):
             'symbol': symbol,
             'reason': 'The current M1 archive set does not contain the adapter.',
             'restore_when': 'The adapter archive is selected and emits this branch.',
+            'archive_not_selected': 'build-adapter.py',
         }
         result.update(updates)
         return result
@@ -159,12 +159,14 @@ class PrelinkRegressionTests(unittest.TestCase):
 
     def test_missing_deferred_original_branch_is_recorded(self):
         report = kernel.check_prelink_regressions(
-            self.record(), self.policy(required_original_branches_deferred=[self.deferred()]))
+            self.record(), self.policy(required_original_branches=['adapter']),
+            [self.deferred()])
         self.assertEqual(report['deferred_original_branches'], [{
             'symbol': 'adapter',
             'status': 'missing',
             'reason': 'The current M1 archive set does not contain the adapter.',
             'restore_when': 'The adapter archive is selected and emits this branch.',
+            'archive_not_selected': 'build-adapter.py',
             'bindings': [],
         }])
 
@@ -173,26 +175,29 @@ class PrelinkRegressionTests(unittest.TestCase):
         record = self.record()
         record['native_original_branches'] = [binding]
         report = kernel.check_prelink_regressions(
-            record, self.policy(required_original_branches_deferred=[self.deferred()]))
+            record, self.policy(required_original_branches=['adapter']), [self.deferred()])
         self.assertEqual(report['deferred_original_branches'][0]['status'], 'recovered')
         self.assertEqual(report['deferred_original_branches'][0]['bindings'], [binding])
 
-    def test_active_and_deferred_original_branch_overlap_is_rejected(self):
-        with self.assertRaisesRegex(Error, 'both required and deferred: adapter'):
+    def test_deferred_original_branch_must_be_required_by_policy(self):
+        with self.assertRaisesRegex(Error, 'policy does not require: adapter'):
             kernel.check_prelink_regressions(
-                self.record('adapter'),
-                self.policy(required_original_branches=['adapter'],
-                            required_original_branches_deferred=[self.deferred()]))
+                self.record(), self.policy(), [self.deferred()])
 
-    def test_deferred_original_branch_requires_reason_and_restore_condition(self):
-        for field in ('reason', 'restore_when'):
+    def test_deferred_original_branch_requires_review_and_archive_guard(self):
+        for field in ('reason', 'restore_when', 'archive_not_selected'):
             with self.subTest(field=field):
                 entry = self.deferred()
                 del entry[field]
                 with self.assertRaisesRegex(Error, field):
                     kernel.check_prelink_regressions(
-                        self.record(),
-                        self.policy(required_original_branches_deferred=[entry]))
+                        self.record(), self.policy(required_original_branches=['adapter']), [entry])
+
+    def test_deferred_original_branch_is_rejected_after_archive_is_selected(self):
+        with self.assertRaisesRegex(Error, 'build-adapter.py is selected'):
+            kernel.check_prelink_regressions(
+                self.record(), self.policy(required_original_branches=['adapter']),
+                [self.deferred()], ['build-adapter.py --full'])
 
     def test_prelink_persists_regression_summary_in_published_record(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -203,15 +208,19 @@ class PrelinkRegressionTests(unittest.TestCase):
             policy = root / 'policy.json'
             policy.write_text(json.dumps(self.policy(
                 kernelcache_sha256=hashlib.sha256(cache.read_bytes()).hexdigest(),
-                required_original_branches_deferred=[self.deferred()])))
+                required_original_branches=['adapter'])))
             ctx = SimpleNamespace(
                 tree=root, work=root, logs=root,
                 args=SimpleNamespace(skip_prelink=False),
                 option=lambda *args: cache,
-                board={'kernel': {'prelink': {
-                    'kernel': 'native', 'tool': 'emit.py', 'slide': '0',
-                    'regression_policy': 'policy.json',
-                }}})
+                board={'kernel': {
+                    'archives': [],
+                    'prelink': {
+                        'kernel': 'native', 'tool': 'emit.py', 'slide': '0',
+                        'regression_policy': 'policy.json',
+                        'deferred_original_branches': [self.deferred()],
+                    },
+                }})
             output = root / 'kernel/kernel.macho'
 
             def emit(command, **kwargs):

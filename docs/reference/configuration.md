@@ -124,6 +124,7 @@ profile list belongs in the override of the profile that uses it.
 | `early_security_init` | string | `identifier=address` |
 | `kernelcache` | string | Optional path to a local kernelcache |
 | `kernelcache_sha256` | string | Expected kernelcache hash |
+| `deferred_original_branches` | array | Board-reviewed required branch deferrals; each names `symbol`, `reason`, `restore_when`, and `archive_not_selected` |
 | `extra_args` | array | Extra prelink arguments |
 
 ### [firmware]

@@ -121,6 +121,7 @@ kernel_args = ["-v", "serial=3", "debug=0x14e"]
 | `early_security_init` | 字符串 | `identifier=address` |
 | `kernelcache` | 字符串 | 可选本地 kernelcache 路径 |
 | `kernelcache_sha256` | 字符串 | 期望 kernelcache 哈希 |
+| `deferred_original_branches` | 数组 | 经板级复核的必需分支延期；每项包含 `symbol`、`reason`、`restore_when` 和 `archive_not_selected` |
 | `extra_args` | 数组 | 预链接额外参数 |
 
 ### [firmware]

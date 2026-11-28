@@ -318,8 +318,10 @@ def stage_native(kernel, output, adreno_abi=None):
     return output
 
 
-def _branch_policy_entries(entries, field):
-    """Return unique (symbol, entry) pairs for a branch-policy list."""
+def _branch_policy_entries(entries, label):
+    """Return unique (symbol, entry) pairs for a validated branch list."""
+    if not isinstance(entries, list):
+        raise Error(f'{label} must be an array')
     result = []
     seen = set()
     for entry in entries:
@@ -330,16 +332,16 @@ def _branch_policy_entries(entries, field):
         else:
             symbol = None
         if not isinstance(symbol, str) or not symbol:
-            raise Error(f'prelink regression policy {field} entry has no symbol')
+            raise Error(f'{label} entry has no symbol')
         if symbol in seen:
-            raise Error(f'prelink regression policy {field} repeats {symbol}')
+            raise Error(f'{label} repeats {symbol}')
         seen.add(symbol)
         result.append((symbol, entry))
     return result
 
 
-def check_prelink_regressions(record, policy):
-    """An experimental allow-missing build may improve, but cannot add gaps."""
+def check_prelink_regressions(record, policy, deferred=None, archives=()):
+    """Bound unresolved references and record board-reviewed branch deferrals."""
     slide = int(record['collection_slide'], 16)
     for kind in ('missing', 'stubbed'):
         for owner, targets in record[kind].items():
@@ -349,15 +351,18 @@ def check_prelink_regressions(record, policy):
                 if count > allowed:
                     raise Error(f'prelink regression: {kind} {owner} original {original}, {count} sites (allowed {allowed})')
     active = _branch_policy_entries(policy.get('required_original_branches', []),
-                                    'required_original_branches')
-    deferred = _branch_policy_entries(policy.get('required_original_branches_deferred', []),
-                                      'required_original_branches_deferred')
+                                    'prelink regression policy required_original_branches')
+    deferred = _branch_policy_entries(deferred or [], '[kernel.prelink] deferred_original_branches')
     active_symbols = {symbol for symbol, _ in active}
     deferred_symbols = {symbol for symbol, _ in deferred}
-    overlap = active_symbols & deferred_symbols
-    if overlap:
-        raise Error('prelink regression policy lists original branches as both required and deferred: '
-                    + ', '.join(sorted(overlap)))
+    unknown = deferred_symbols - active_symbols
+    if unknown:
+        raise Error('board defers original branches that the regression policy does not require: '
+                    + ', '.join(sorted(unknown)))
+    selected_archives = {
+        Path(shlex.split(command)[0]).name
+        for command in archives if isinstance(command, str) and shlex.split(command)
+    }
 
     bindings = {}
     for entry in record.get('native_original_branches', []):
@@ -366,25 +371,34 @@ def check_prelink_regressions(record, policy):
             raise Error('prelink record has an invalid native_original_branches entry')
         bindings.setdefault(symbol, []).append(entry)
 
-    missing = active_symbols - set(bindings)
+    missing = active_symbols - deferred_symbols - set(bindings)
     if missing:
         raise Error('prelink lacks required absolute adapter branch relocations: '
                     + ', '.join(sorted(missing)))
 
     deferred_status = []
     for symbol, entry in deferred:
+        if not isinstance(entry, dict):
+            raise Error(f'deferred original branch {symbol} must be a table')
         reason = entry.get('reason') if isinstance(entry, dict) else None
         restore_when = entry.get('restore_when') if isinstance(entry, dict) else None
+        archive_not_selected = entry.get('archive_not_selected')
         if not isinstance(reason, str) or not reason:
             raise Error(f'deferred original branch {symbol} has no reason')
         if not isinstance(restore_when, str) or not restore_when:
             raise Error(f'deferred original branch {symbol} has no restore_when')
+        if not isinstance(archive_not_selected, str) or not archive_not_selected:
+            raise Error(f'deferred original branch {symbol} has no archive_not_selected')
+        if Path(archive_not_selected).name in selected_archives:
+            raise Error(f'deferred original branch {symbol} no longer permits deferral because '
+                        f'{archive_not_selected} is selected')
         recovered = symbol in bindings
         deferred_status.append({
             'symbol': symbol,
             'status': 'recovered' if recovered else 'missing',
             'reason': reason,
             'restore_when': restore_when,
+            'archive_not_selected': archive_not_selected,
             'bindings': bindings.get(symbol, []),
         })
     return {'deferred_original_branches': deferred_status}
@@ -445,7 +459,9 @@ def prelink(ctx, adreno_abi=None):
                 if policy['kernelcache_sha256'] != sha256_file(cache):
                     raise Error('prelink regression policy names another kernelcache')
                 record = json.loads(candidate.with_suffix('.json').read_text())
-                record['prelink_regression'] = check_prelink_regressions(record, policy)
+                record['prelink_regression'] = check_prelink_regressions(
+                    record, policy, spec.get('deferred_original_branches'),
+                    ctx.board.get('kernel', {}).get('archives', []))
                 candidate.with_suffix('.json').write_text(json.dumps(record, indent=2) + '\n')
                 for item in record['prelink_regression']['deferred_original_branches']:
                     if item['status'] == 'recovered':
